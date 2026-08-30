@@ -885,6 +885,14 @@ msgstr "始终扫描的 IP"
 msgid "The IPs in the list are always subjected to online detection regardless of whether they exist in the ARP list, suitable for secondary routing scenarios."
 msgstr "列表中的 IP 始终进行在线检测，无论它是否存在于 ARP 列表，适用于二级路由等情况"
 
+#: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/advanced.js:95
+msgid "LAN bridge interfaces to scan"
+msgstr "参与扫描的局域网桥接口"
+
+#: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/advanced.js:95
+msgid "Leave empty to auto-detect all non-WAN interfaces (e.g. br-lan, guest network bridge). Fill in manually only if auto-detection misses a network segment, e.g. \"br-lan br-guest\"."
+msgstr "留空则自动探测所有非 WAN 接口（如 br-lan、访客网络桥接口）。仅当自动探测遗漏某个网段时才需要手动填写，例如 \"br-lan br-guest\""
+
 #: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/advanced.js:45
 msgid "When this option is selected, the offline timeout and offline detection count apply only to the devices that require push notifications. Other devices will use default values, which can significantly reduce the time required for detection. However, it may result in inaccurate online time displayed in the online devices list. It is recommended to enable this option only when there are many devices and frequent offline occurrences are observed for specific devices of interest."
 msgstr "选中此项后，离线超时时间和离线检测次数只针对需要推送的设备，其余设备使用默认值，可有效减少检测所需的时间，但会造成在线设备列表中的在线时间不准确，仅建议设备较多且关注的设备离线频繁时使用"
@@ -974,6 +982,10 @@ msgstr "从小米路由器中获取无线频段信息和主机名"
 msgid "Get wireless band information and hostname from other OpenWrt"
 msgstr "从其他 OpenWrt 中获取无线频段信息和主机名"
 
+#: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/advanced.js:166
+msgid "Discover WireGuard peers (tunnel interfaces have no ARP records)"
+msgstr "获取 WireGuard 对等端信息（隧道接口无 ARP 记录）"
+
 #: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/advanced.js:167
 msgid "Scan local IP"
 msgstr "扫描局域网 IP"
@@ -1049,6 +1061,14 @@ msgstr "ROS 路由器用户名"
 #: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/advanced.js:216
 msgid "The main router address is all that is needed in the Mesh wireless network topology."
 msgstr "Mesh 无线网络拓扑中，只需要填写主路由地址"
+
+#: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/advanced.js:216
+msgid "WireGuard interface name(s)"
+msgstr "WireGuard 接口名称"
+
+#: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/advanced.js:216
+msgid "Requires wireguard-tools (the \"wg\" command) to be installed. Tunnel interfaces do not produce ARP records, so peer IPs are read from \"wg show &lt;interface&gt; allowed-ips\" instead."
+msgstr "需要安装 wireguard-tools（wg 命令）。隧道接口不会产生 ARP 记录，因此改为通过 \"wg show <接口名> allowed-ips\" 读取对等端 IP"
 
 #: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/advanced.js:135
 msgid "IP range to be scanned"
@@ -1249,14 +1269,23 @@ msgstr "设备 %s 通过 %s 登录了路由器"
 msgid "/ (Homepage login)"
 msgstr "/ (首页登录)"
 
-msgid "%s frequent %s login attempts"
-msgstr "%s 频繁尝试 %s 登录"
+msgid "%s frequent %s login attempts, blocked"
+msgstr "%s 频繁尝试 %s 登录，已封禁"
 
 msgid "Frequent Login Attempts Information"
 msgstr "频繁尝试登录信息"
 
-msgid "Device %s (%s) frequently attempted %s %s login"
-msgstr "设备 %s (%s) 频繁尝试 %s %s 登录"
+msgid "Device %s (%s) frequently attempted %s %s login, blocked"
+msgstr "设备 %s (%s) 频繁尝试 %s %s 登录，已封禁"
+
+msgid "%s failed %s login attempt (%s/%s)"
+msgstr "%s %s 登录失败 (%s/%s)"
+
+msgid "Login Failed Information"
+msgstr "登录失败信息"
+
+msgid "Device %s (%s) failed %s login %s (%s/%s)"
+msgstr "设备 %s (%s) %s 登录失败 %s (%s/%s)"
 
 msgid "%s logged into router via %s"
 msgstr "%s 通过 %s 登录了路由器"
@@ -1563,6 +1592,9 @@ msgstr "载入上次重启前日志"
 
 msgid "wrtbwmon not installed, traffic statistics unavailable"
 msgstr "未安装 wrtbwmon，流量统计不可用"
+
+msgid "wireguard-tools (wg command) not installed, unable to get WireGuard peer information"
+msgstr "未安装 wireguard-tools（wg 命令），无法获取 WireGuard 对等端信息"
 
 msgid "Cannot get iputils-arping version, please confirm if plugin is running properly"
 msgstr "无法获取依赖项 iputils-arping 版本号，请确认插件是否正常运行"

@@ -162,11 +162,17 @@ return view.extend({
 		}, this);
 		o.depends('passive_mode', '0');
 
+		o = s.option(form.DynamicList, 'lan_interface', _('LAN bridge interfaces to scan'));
+		o.placeholder = 'br-lan';
+		o.description = _('Leave empty to auto-detect all non-WAN interfaces (e.g. br-lan, guest network bridge). Fill in manually only if auto-detection misses a network segment, e.g. "br-lan br-guest".');
+		o.depends('passive_mode', '0');
+
 		o = s.option(form.MultiValue, 'device_info_helper', _('Assist in obtaining device information'));
 		o.value('gateway_info', _('Retrieve hostname list from modem'));
 		o.value('miwifi_info', _('Get wireless band information and hostname from MiWiFi'));
 		o.value('mikrotik_info', _('Retrieve hostname list from modem MikroTik Router'));
 		o.value('openwrt_info', _('Get wireless band information and hostname from other OpenWrt'));
+		o.value('wireguard_info', _('Discover WireGuard peers (tunnel interfaces have no ARP records)'));
 		o.value('scan_local_ip', _('Scan local IP'));
 		o.modalonly = true;
 		o.description = _('When OpenWrt is used as a bypass gateway and cannot obtain device hostnames or a complete list of local network devices.<br/>the \"Retrieve hostname list from modem\" option has only been tested with HG5143F/HN8145V China Telecom gateways and may not be universally applicable.<br/>The \"Scan local IP\" option may not retrieve hostnames, so please use device name annotations in conjunction with it.');
@@ -232,6 +238,12 @@ return view.extend({
 		o.rmempty = true;
 		o.description = _('echo -e "\\n" | ssh-keygen -t rsa -f /root/.ssh/id_rsa -N ""<br/>ssh root@your_openwrt_ip "mkdir -p /root/.ssh && chmod 700 /root/.ssh && echo $(cat /root/.ssh/id_rsa.pub) >> /etc/dropbear/authorized_keys && chmod 600 /etc/dropbear/authorized_keys"')
 		o.depends({ device_info_helper: "openwrt_info", '!contains': true });
+
+		o = s.option(form.DynamicList, "wireguard_interface", _('WireGuard interface name(s)'));
+		o.rmempty = true;
+		o.placeholder = 'wg0';
+		o.description = _('Requires wireguard-tools (the "wg" command) to be installed. Tunnel interfaces do not produce ARP records, so peer IPs are read from "wg show &lt;interface&gt; allowed-ips" instead.');
+		o.depends({ device_info_helper: "wireguard_info", '!contains': true });
 
 		o = s.option(form.Value, "scan_ip_range", _('IP range to be scanned'))
 		o.rmempty = true

@@ -53,7 +53,8 @@ read_config() {
 		"do_not_disturb_mode" "do_not_disturb_starttime" "do_not_disturb_endtime" "up_down_push_whitelist" "up_down_push_blacklist" "up_down_push_interface" "mac_online_list" "mac_offline_list" "cpu_threshold_duration" "cpu_notification_delay" "login_disturb" "login_notification_delay" "login_log_enable" \
 		"up_timeout" "down_timeout" "timeout_retry_count" "always_check_ip_list" "only_timeout_push" "passive_mode" "thread_num" "defaultSortColumn" "soc_code" "server_host" "server_port" \
 		"unattended_enable" "zerotier_helper" "unattended_only_on_disturb_time" "unattended_device_aliases" "network_disconnect_event" "unattended_autoreboot_mode" "autoreboot_system_uptime" "autoreboot_network_uptime" \
-		"device_info_helper" "gateway_host_url" "gateway_info_url" "gateway_logout_url" "gateway_username_id" "gateway_password_id" "gateway_username" "gateway_password" "miwifi_ip" "miwifi_password" "mikrotik_ip" "mikrotik_username" "op_host_ips" "scan_ip_range" "device_info_helper_sleeptime"
+		"device_info_helper" "gateway_host_url" "gateway_info_url" "gateway_logout_url" "gateway_username_id" "gateway_password_id" "gateway_username" "gateway_password" "miwifi_ip" "miwifi_password" "mikrotik_ip" "mikrotik_username" "op_host_ips" "scan_ip_range" "device_info_helper_sleeptime" \
+		"lan_interface" "wireguard_interface"
 
 	(echo "$device_notification" | grep -q "online") && notification_online="true"
 	(echo "$device_notification" | grep -q "offline") && notification_offline="true"
@@ -67,7 +68,9 @@ read_config() {
 	(echo "$device_info_helper" | grep -q "miwifi_info") && miwifi_info_enable="true"
 	(echo "$device_info_helper" | grep -q "mikrotik_info") && mikrotik_info_enable="true"
 	(echo "$device_info_helper" | grep -q "openwrt_info") && openwrt_info_enable="true"
+	(echo "$device_info_helper" | grep -q "wireguard_info") && wireguard_info_enable="true"
 	op_host_ips=$(echo "$op_host_ips" | sed 's/ /\n/g') 2>/dev/null
+	lan_interface=$(echo "$lan_interface" | sed 's/ /\n/g') 2>/dev/null
 	if [ -x "/usr/bin/apk" ]; then
 		for str_version in "wrtbwmon" "iputils-arping" "curl" "iw"; do
 			eval $(echo ${str_version:0:2}"_version")=$(apk list | grep -w ^${str_version} | grep 'installed' | awk '{print $1}' | awk -F ${str_version}"-" '{print $2}') 2>/dev/null
@@ -699,6 +702,9 @@ getinterface() {
 	local ip=${1}
 	local mac=${2}
 	local interface
+
+	# WireGuard 隧道对等端没有 MAC/ARP 记录，需在 MAC 判断之前单独识别
+	[ -n "$ip" ] && [ -n "$wireguard_iplist" ] && echo "$wireguard_iplist" | grep -w -q "$ip" && echo "WireGuard" && return
 
 	[ -z "$mac" ] && return
 	[ "$mac" == "unknown" ] && return
@@ -1798,6 +1804,31 @@ getmikrotik() {
 	fi
 }
 
+# 获取 WireGuard 对等端信息
+# WireGuard 是纯三层隧道接口，不产生 ARP 记录，first() 中按 ARP 表扫描的方式无法发现其对等端，
+# 因此需要单独通过 wg 命令读取隧道内的对等端地址（AllowedIPs），并入在线检测的 IP 列表
+getwireguard() {
+	[ -z "$wireguard_info_enable" ] && return
+	[ -z "$wireguard_interface" ] && return
+	unset wireguard_iplist
+	command -v wg >/dev/null 2>&1 || {
+		log_change "[WARN] $(translate "wireguard-tools (wg command) not installed, unable to get WireGuard peer information")"
+		return 1
+	}
+
+	local wg_iface pubkey allowed_ips peer_ip
+	for wg_iface in $wireguard_interface; do
+		# wg show <接口> allowed-ips 每行输出："公钥<TAB>允许的IP1/掩码,允许的IP2/掩码,..."
+		while IFS=$'\t' read -r pubkey allowed_ips; do
+			[ -z "$allowed_ips" ] && continue
+			for peer_ip in $(echo "$allowed_ips" | tr ',' '\n' | cut -d'/' -f1); do
+				echo "$peer_ip" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$' && wireguard_iplist="${wireguard_iplist}"$'\n'"${peer_ip}"
+			done
+		done <<<"$(run_with_tag wg show "$wg_iface" allowed-ips 2>/dev/null)"
+	done
+	wireguard_iplist=$(echo "$wireguard_iplist" | grep -v "^$" | sort -u)
+}
+
 # 在线设备列表
 first() {
 	# 注：此处为后台任务，无法操作父进程变量，故每个线程结束后都必须保存变量到文件
@@ -1807,6 +1838,7 @@ first() {
 	[ ! -f "${dir}/send_pid" ] && getmiwifi
 	[ ! -f "${dir}/send_pid" ] && getopenwrt
 	[ ! -f "${dir}/send_pid" ] && getmikrotik
+	[ ! -f "${dir}/send_pid" ] && getwireguard
 	[ ! -f "${dir}/send_pid" ] && silent_run scanlocalip
 	for ip in $IPLIST; do
 		[ -n "$passive_mode" ] && [ "$passive_mode" -eq "1" ] && break
@@ -1820,15 +1852,26 @@ first() {
 	done
 	wait
 
-	local IP_INFO=$(ip addr show br-lan | grep 'inet ' | awk '{print $2}' | head -n 1)
-	local NETMASK=$(echo "$IP_INFO" | cut -d'/' -f2)
-	[ -n "$IP_INFO" ] && [ "$NETMASK" == "24" ] && local SUBNET=$(echo $IP_INFO | cut -d'/' -f1 | cut -d'.' -f1-3)
-	[ -n "$SUBNET" ] && local IPLIST=$(cat /proc/net/arp | grep "0x2\|0x6" | awk '{print $1}' | grep -v "^169.254." | grep -v "^$" | sort -u | grep -oE "${SUBNET}\.[0-9]{1,3}") || local IPLIST=$(cat /proc/net/arp | grep "0x2\|0x6" | awk '{print $1}' | grep -v "^169.254." | grep -v "^$" | sort -u | grep -oE '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}')
+	# 参与 ARP 扫描的局域网桥接口列表，支持多网段（主网络、访客网络等）
+	# 手动配置优先；未配置时自动探测所有非 WAN 的已启用接口对应的设备名
+	local lan_devices
+	if [ -n "$lan_interface" ]; then
+		local lan_devices="$lan_interface"
+	else
+		local lan_devices=$(ubus call network.interface dump 2>/dev/null | jq -r '.interface[] | select(.up == true and .interface != "loopback" and (.interface | test("^wan"; "i") | not)) | .device' | grep -v "^null$" | grep -v "^$" | sort -u)
+	fi
+	# 按接口过滤 ARP 表（第 6 列为设备名），而非仅按 br-lan 的网段字符串匹配，
+	# 这样访客网络、旁路网桥等独立网桥都能被覆盖，且不受限于 /24 掩码假设
+	local IPLIST=$(cat /proc/net/arp | grep "0x2\|0x6" | grep -v "^169.254." | grep -v "^$" | awk -v devs="$lan_devices" '
+		BEGIN { n = split(devs, arr, "\n"); for (i = 1; i <= n; i++) if (arr[i] != "") dev_ok[arr[i]] = 1 }
+		($6 in dev_ok) { print $1 }
+	' | sort -u)
 
 	local IPLIST+=$'\n'"$gateway_iplist"
 	local IPLIST+=$'\n'"$miwifi_iplist"
 	local IPLIST+=$'\n'"$openwrt_iplist"
-	local IPLIST+=$'\n'"$mikrotik_info"
+	local IPLIST+=$'\n'"$mikrotik_iplist"
+	local IPLIST+=$'\n'"$wireguard_iplist"
 	local IPLIST+=$'\n'"$always_check_ip_list"
 	local IPLIST=$(echo "$IPLIST" | grep -v "^$" | sort -u)
 	for ip in $IPLIST; do
@@ -2468,12 +2511,18 @@ process_login() {
 	login_counts["$login_ip"]=$((login_counts["$login_ip"] + 1))
 	local count=${login_counts["$login_ip"]}
 
-	# 封禁
-	if [[ $count -ge $login_max_num && ("$3" == "web_failed_counts" || "$3" == "ssh_failed_counts") ]]; then
-		add_ip_black ${login_ip} && {
-			unset login_counts["$login_ip"]
-		}
-		login_send "$login_ip" "$login_time" "$3"
+	# 登录失败：每次尝试都实时推送通知（原逻辑仅在达到阈值时才调用 login_send，
+	# 导致未达阈值的失败尝试完全没有推送，与"登录成功"的实时推送行为不一致）
+	# 达到阈值后额外拉黑来源 IP，并在推送中标记为"频繁尝试"
+	if [[ "$3" == "web_failed_counts" || "$3" == "ssh_failed_counts" ]]; then
+		local banned=""
+		if [ "$count" -ge "$login_max_num" ]; then
+			add_ip_black ${login_ip} && {
+				unset login_counts["$login_ip"]
+				banned="1"
+			}
+		fi
+		login_send "$login_ip" "$login_time" "$3" "$count" "$banned"
 	fi
 
 	# 正常登录
@@ -2671,6 +2720,8 @@ login_send() {
 	local login_ip=$1
 	local login_time=$2
 	local log_type=$3
+	local attempt_count=$4
+	local banned=$5
 
 	local login_title
 	local login_content
@@ -2705,9 +2756,15 @@ login_send() {
 
 	if [ -z "$login_disturb" ] || [ "$login_disturb" -ne "1" ]; then
 		if [[ "$log_type" == *"failed"* ]]; then
-			local login_title=$(translate "%s frequent %s login attempts" "$login_ip" "$log_type_short")
-			local login_content_info="${str_splitline}${str_title_start}$(translate "Frequent Login Attempts Information")${str_title_end}"
-			log_change "${disturb_text} $(translate "Device %s (%s) frequently attempted %s %s login" "$login_ip" "$login_ip_attribution" "$log_type_short" "$login_mode")"
+			if [ "$banned" = "1" ]; then
+				local login_title=$(translate "%s frequent %s login attempts, blocked" "$login_ip" "$log_type_short")
+				local login_content_info="${str_splitline}${str_title_start}$(translate "Frequent Login Attempts Information")${str_title_end}"
+				log_change "${disturb_text} $(translate "Device %s (%s) frequently attempted %s %s login, blocked" "$login_ip" "$login_ip_attribution" "$log_type_short" "$login_mode")"
+			else
+				local login_title=$(translate "%s failed %s login attempt (%s/%s)" "$login_ip" "$log_type_short" "$attempt_count" "$login_max_num")
+				local login_content_info="${str_splitline}${str_title_start}$(translate "Login Failed Information")${str_title_end}"
+				log_change "${disturb_text} $(translate "Device %s (%s) failed %s login %s (%s/%s)" "$login_ip" "$login_ip_attribution" "$log_type_short" "$login_mode" "$attempt_count" "$login_max_num")"
+			fi
 		else
 			local login_title=$(translate "%s logged into router via %s" "$login_ip" "$log_type_short")
 			local login_content_info="${str_splitline}${str_title_start}$(translate "Login Information")${str_title_end}"
