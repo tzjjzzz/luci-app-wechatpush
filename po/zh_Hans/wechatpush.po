@@ -886,12 +886,12 @@ msgid "The IPs in the list are always subjected to online detection regardless o
 msgstr "列表中的 IP 始终进行在线检测，无论它是否存在于 ARP 列表，适用于二级路由等情况"
 
 #: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/advanced.js:95
-msgid "LAN bridge interfaces to scan"
-msgstr "参与扫描的局域网桥接口"
+msgid "LAN interfaces to scan"
+msgstr "参与扫描的局域网接口"
 
 #: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/advanced.js:95
-msgid "Leave empty to auto-detect all non-WAN interfaces (e.g. br-lan, guest network bridge). Fill in manually only if auto-detection misses a network segment, e.g. \"br-lan br-guest\"."
-msgstr "留空则自动探测所有非 WAN 接口（如 br-lan、访客网络桥接口）。仅当自动探测遗漏某个网段时才需要手动填写，例如 \"br-lan br-guest\""
+msgid "Select which network interfaces to scan for devices, e.g. the guest network. Leave empty to auto-detect all non-WAN interfaces."
+msgstr "选择需要扫描设备的网络接口，比如访客网络。留空则自动探测所有非 WAN 接口"
 
 #: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/advanced.js:45
 msgid "When this option is selected, the offline timeout and offline detection count apply only to the devices that require push notifications. Other devices will use default values, which can significantly reduce the time required for detection. However, it may result in inaccurate online time displayed in the online devices list. It is recommended to enable this option only when there are many devices and frequent offline occurrences are observed for specific devices of interest."
@@ -1598,6 +1598,9 @@ msgstr "未安装 wrtbwmon，流量统计不可用"
 
 msgid "wireguard-tools (wg command) not installed, unable to get WireGuard peer information"
 msgstr "未安装 wireguard-tools（wg 命令），无法获取 WireGuard 对等端信息"
+
+msgid "LAN scan interfaces: %s -> devices: %s"
+msgstr "本轮扫描接口：%s -> 对应设备：%s"
 
 msgid "Cannot get iputils-arping version, please confirm if plugin is running properly"
 msgstr "无法获取依赖项 iputils-arping 版本号，请确认插件是否正常运行"

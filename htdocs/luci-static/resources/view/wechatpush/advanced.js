@@ -6,6 +6,7 @@
 'require rpc';
 'require form';
 'require poll';
+'require network';
 
 return view.extend({
 	callHostHints: rpc.declare({
@@ -17,7 +18,8 @@ return view.extend({
 	load: function () {
 		return Promise.all([
 			this.callHostHints(),
-			fs.read('/proc/net/arp')
+			fs.read('/proc/net/arp'),
+			network.getNetworks()
 		]);
 	},
 
@@ -64,6 +66,10 @@ return view.extend({
 	render: function (data) {
 		var arpData = data[1],
 			hosts = this.parseArp(arpData),
+			lanNets = (data[2] || []).filter(function (net) {
+				var name = net.getName();
+				return name && name !== 'loopback' && !/^wan/i.test(name);
+			}),
 			m, s, o,
 			programPath = '/usr/share/wechatpush/wechatpush';
 
@@ -162,9 +168,14 @@ return view.extend({
 		}, this);
 		o.depends('passive_mode', '0');
 
-		o = s.option(form.DynamicList, 'lan_interface', _('LAN bridge interfaces to scan'));
-		o.placeholder = 'br-lan';
-		o.description = _('Leave empty to auto-detect all non-WAN interfaces (e.g. br-lan, guest network bridge). Fill in manually only if auto-detection misses a network segment, e.g. "br-lan br-guest".');
+		o = s.option(form.MultiValue, 'lan_interface', _('LAN interfaces to scan'));
+		lanNets.forEach(function (net) {
+			var name = net.getName(),
+				dev = net.getDevice(),
+				label = dev ? (name + ' (' + dev.getName() + ')') : name;
+			o.value(name, label);
+		});
+		o.description = _('Select which network interfaces to scan for devices, e.g. the guest network. Leave empty to auto-detect all non-WAN interfaces.');
 		o.depends('passive_mode', '0');
 
 		o = s.option(form.MultiValue, 'device_info_helper', _('Assist in obtaining device information'));

@@ -1855,14 +1855,34 @@ first() {
 	done
 	wait
 
-	# 参与 ARP 扫描的局域网桥接口列表，支持多网段（主网络、访客网络等）
-	# 手动配置优先；未配置时自动探测所有非 WAN 的已启用接口对应的设备名
-	local lan_devices
+	# 参与 ARP 扫描的局域网接口列表，支持多网段（主网络、访客网络等）
+	# 手动配置优先，填的是 UCI 接口名（如 lan、guest，对应"网络"页面里看到的接口名），
+	# 而不是网桥设备名，避免用户需要自己去猜 br-guest 之类的内部设备名；
+	# 未配置时自动探测所有非 WAN 的已启用接口
+	local lan_iface_names
 	if [ -n "$lan_interface" ]; then
-		local lan_devices="$lan_interface"
+		local lan_iface_names="$lan_interface"
 	else
-		local lan_devices=$(ubus call network.interface dump 2>/dev/null | jq -r '.interface[] | select(.up == true and .interface != "loopback" and (.interface | test("^wan"; "i") | not)) | .device' | grep -v "^null$" | grep -v "^$" | sort -u)
+		local lan_iface_names=$(ubus call network.interface dump 2>/dev/null | jq -r '.interface[] | select(.up == true and .interface != "loopback" and (.interface | test("^wan"; "i") | not)) | .interface' | sort -u)
 	fi
+
+	# 把接口名逐个解析成实际的网桥/设备名，同时兼容 device 和 l3_device 两种字段命名
+	# （不同 OpenWrt/netifd 版本字段不一致，只取 dump 里的 .device 曾导致部分接口解析不到）；
+	# 解析不到时兼容旧配置，直接把填的值当设备名用
+	local lan_devices=""
+	local iface_name resolved_dev
+	for iface_name in $lan_iface_names; do
+		[ -z "$iface_name" ] && continue
+		resolved_dev=$(ubus call network.interface."$iface_name" status 2>/dev/null | jq -r '.device // .l3_device // empty')
+		if [ -n "$resolved_dev" ] && [ "$resolved_dev" != "null" ]; then
+			lan_devices="${lan_devices}"$'\n'"${resolved_dev}"
+		else
+			lan_devices="${lan_devices}"$'\n'"${iface_name}"
+		fi
+	done
+	lan_devices=$(echo "$lan_devices" | grep -v "^$" | sort -u)
+	log_change "[DEBUG] $(translate "LAN scan interfaces: %s -> devices: %s" "$(echo "$lan_iface_names" | tr '\n' ' ')" "$(echo "$lan_devices" | tr '\n' ' ')")"
+
 	# 按接口过滤 ARP 表（第 6 列为设备名），而非仅按 br-lan 的网段字符串匹配，
 	# 这样访客网络、旁路网桥等独立网桥都能被覆盖，且不受限于 /24 掩码假设
 	local IPLIST=$(cat /proc/net/arp | grep "0x2\|0x6" | grep -v "^169.254." | grep -v "^$" | awk -v devs="$lan_devices" '
