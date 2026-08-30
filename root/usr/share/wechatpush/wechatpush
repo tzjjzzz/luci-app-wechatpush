@@ -851,6 +851,9 @@ getinterfaceuptime() {
 # 查询 IP 归属地
 get_ip_attribution() {
 	ip="$1"
+	# 私有/内网地址（含首次登录、尚未被扫描发现的设备）直接判定为本地局域网，
+	# 避免拿内网 IP 去查公网归属地接口返回 null 拼接成 "null null null"
+	echo "$ip" | grep -Eq '^(10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)' && echo "本地局域网" && return
 	jq -e --arg ip "$ip" '.devices[] | select(.ip == $ip)' "$devices_json" >/dev/null 2>&1 && echo "本地局域网" && return
 	local ip_attribution_urls=$(cat /usr/share/wechatpush/api/ip_attribution.list)
 	local sorted_attribution_urls=$(echo "$ip_attribution_urls" | awk 'BEGIN {srand()} {print rand() "\t" $0}' | sort -k1,1n | cut -f2-)
@@ -2074,12 +2077,13 @@ ${str_title_start}$(translate "Currently %d online devices, details below" "$log
 	fi
 
 	# 定义数组，预处理
-	declare -a ips totals time_onlines names
+	declare -a ips totals time_onlines names interfaces macs
 	local idx=0
 
 	for ip in $IPLIST; do
-		local mac total name time_up time_online
+		local mac total name time_up time_online interface
 		mac=$(getmac "$ip")
+		interface=$(getinterface "$ip" "$mac")
 		if [ "$has_usage" -eq 1 ]; then
 			total=$(usage get "$mac")
 		else
@@ -2094,6 +2098,8 @@ ${str_title_start}$(translate "Currently %d online devices, details below" "$log
 		totals[idx]="$total"
 		time_onlines[idx]="$time_online"
 		names[idx]="$name"
+		interfaces[idx]="$(cut_str "$interface" "12")"
+		macs[idx]="$mac"
 		idx=$((idx + 1))
 	done
 
@@ -2153,6 +2159,16 @@ ${str_title_start}$(translate "Currently %d online devices, details below" "$log
 		fi
 		line+=$(pad_field "${time_onlines[i]}" "$time_online_max")
 		line+="${names[i]}"
+
+		# 接口/MAC 单独放在每台设备下方新的一行，而不是加宽主表格的列，
+		# 这样无论接口名或 MAC 多长，都不会把上面已经对齐好的 IP/流量/在线时间/名称列挤到换行
+		local detail=""
+		[ -n "${interfaces[i]}" ] && [ "${interfaces[i]}" != "null" ] && detail="$(translate "Interface:") ${interfaces[i]}"
+		if [ -n "${macs[i]}" ] && [ "${macs[i]}" != "unknown" ]; then
+			[ -n "$detail" ] && detail="${detail}${str_space}${str_space}"
+			detail="${detail}$(translate "MAC:") ${macs[i]}"
+		fi
+		[ -n "$detail" ] && line+="${str_linefeed}${str_tab}${str_tab}${detail}"
 
 		content="${content}${line}"
 	done
@@ -2745,7 +2761,9 @@ login_send() {
 	# 登录方式
 	if [[ "$log_type" == "web"* ]]; then
 		# Web 登录、非法登录
-		local login_mode=$(logread | grep -E ".* $login_time.*$login_ip.*" | awk '{print $13}' | tail -n 1)
+		# 原按固定字段位置 $13 提取，实际取到的是日志里的字面量 "for"（进程名/PID 长度不同会导致字段错位），
+		# 改为按 "login on <path> for" 锚点提取真正的登录路径
+		local login_mode=$(logread | grep -E ".* $login_time.*$login_ip.*" | sed -nr 's#.*login on ([^ ]+) for.*#\1#p' | tail -n 1)
 		[ "$login_mode" = "/" ] && login_mode="$(translate "/ (Homepage login)")"
 	elif [[ "$log_type" == "ssh_login"* ]]; then
 		# SSH 登录

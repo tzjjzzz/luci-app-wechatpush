@@ -1521,6 +1521,9 @@ msgstr "地址："
 msgid "Interface:"
 msgstr "接口："
 
+msgid "MAC:"
+msgstr "MAC："
+
 msgid "Router has rebooted!"
 msgstr "路由器已经重启！"
 
