@@ -54,7 +54,8 @@ read_config() {
 		"up_timeout" "down_timeout" "timeout_retry_count" "always_check_ip_list" "only_timeout_push" "passive_mode" "thread_num" "defaultSortColumn" "soc_code" "server_host" "server_port" \
 		"unattended_enable" "zerotier_helper" "unattended_only_on_disturb_time" "unattended_device_aliases" "network_disconnect_event" "unattended_autoreboot_mode" "autoreboot_system_uptime" "autoreboot_network_uptime" \
 		"device_info_helper" "gateway_host_url" "gateway_info_url" "gateway_logout_url" "gateway_username_id" "gateway_password_id" "gateway_username" "gateway_password" "miwifi_ip" "miwifi_password" "mikrotik_ip" "mikrotik_username" "op_host_ips" "scan_ip_range" "device_info_helper_sleeptime" \
-		"lan_interface" "wireguard_interface"
+		"lan_interface" "wireguard_interface" \
+		"usage_backend" "bandix_api_host" "bandix_api_port"
 
 	(echo "$device_notification" | grep -q "online") && notification_online="true"
 	(echo "$device_notification" | grep -q "offline") && notification_offline="true"
@@ -173,7 +174,7 @@ init() {
 	fi
 
 	# 配置检查
-	[ ! -f "/usr/sbin/wrtbwmon" ] && log_change "[WARN] $(translate "wrtbwmon not installed, traffic statistics unavailable")"
+	[ "$usage_backend" != "bandix" ] && [ ! -f "/usr/sbin/wrtbwmon" ] && log_change "[WARN] $(translate "wrtbwmon not installed, traffic statistics unavailable")"
 	[ -z "$ip_version" ] && log_change "[ERROR] $(translate "Cannot get iputils-arping version, please confirm if plugin is running properly")"
 	[ -z "$cu_version" ] && log_change "[ERROR] $(translate "Cannot get curl version, please confirm if plugin is running properly")"
 
@@ -998,9 +999,53 @@ soc_temp() {
 	printf "%.1f" "$temperature"
 }
 
+# 通过 bandix-plus 获取流量数据（基于 eBPF，可覆盖多网卡/隧道接口，替代 wrtbwmon）
+# https://github.com/timsaya/bandix-plus，默认监听 127.0.0.1:8787，GET /api/devices 返回：
+# {"ok":true,"data":[{"mac":"..","ipv4":[".."],"logical_iface":"..","cumulative":{"up_v4_bytes":N,"down_v4_bytes":N,"up_v6_bytes":N,"down_v6_bytes":N,...},"online":true,...}]}
+# 转换成与 wrtbwmon 相同的 CSV 格式写入 usage.db，复用 usage()/get_usage_stats() 现有的解析逻辑，无需改动
+usage_update_bandix() {
+	local api_url="http://${bandix_api_host:-127.0.0.1}:${bandix_api_port:-8787}/api/devices"
+	local raw
+	raw=$(curl -s -m 5 "$api_url" 2>/dev/null)
+	if [ -z "$raw" ]; then
+		log_change "[WARN] $(translate "bandix-plus API unreachable: %s" "$api_url")"
+		return 1
+	fi
+	echo "$raw" | jq -e '.ok == true' >/dev/null 2>&1 || {
+		log_change "[WARN] $(translate "bandix-plus API returned an error: %s" "$api_url")"
+		return 1
+	}
+
+	{
+		echo "mac,ip,iface,total,in,out"
+		echo "$raw" | jq -r '.data[] | [
+			.mac,
+			(.ipv4[0] // ""),
+			.logical_iface,
+			((.cumulative.up_v4_bytes // 0) + (.cumulative.down_v4_bytes // 0) + (.cumulative.up_v6_bytes // 0) + (.cumulative.down_v6_bytes // 0) | tostring),
+			((.cumulative.down_v4_bytes // 0) + (.cumulative.down_v6_bytes // 0) | tostring),
+			((.cumulative.up_v4_bytes // 0) + (.cumulative.up_v6_bytes // 0) | tostring)
+		] | join(",")' 2>/dev/null
+	} >"${dir}/usage.db"
+}
+
 # 流量数据
 usage() {
-	[ ! -f "/usr/sbin/wrtbwmon" ] || [ -z "$1" ] && return
+	[ -z "$1" ] && return
+	if [ "$usage_backend" = "bandix" ]; then
+		case "$1" in
+		update)
+			usage_update_bandix
+			return
+			;;
+		down)
+			[ "$2" ] && sed -i "/,${2},/d" ${dir}/usage.db 2>/dev/null
+			return
+			;;
+		esac
+	else
+		[ ! -f "/usr/sbin/wrtbwmon" ] && return
+	fi
 	# 更新
 	if [ $1 == "update" ]; then
 		version_le() { test "$(echo "$@" | tr " " "\n" | sort -n | head -n 1)" == "$1"; }
@@ -1039,7 +1084,7 @@ get_usage_stats() {
 	local mac="$1"
 	local has_direction="0"
 
-	if [ ! -f "/usr/sbin/wrtbwmon" ] || [ -z "$mac" ] || [ ! -f "${dir}/usage.db" ]; then
+	if { [ "$usage_backend" != "bandix" ] && [ ! -f "/usr/sbin/wrtbwmon" ]; } || [ -z "$mac" ] || [ ! -f "${dir}/usage.db" ]; then
 		echo "0 0 0 0"
 		return
 	fi
@@ -1811,8 +1856,14 @@ getmikrotik() {
 # WireGuard 是纯三层隧道接口，不产生 ARP 记录，first() 中按 ARP 表扫描的方式无法发现其对等端，
 # 因此需要单独通过 wg 命令读取隧道内的对等端地址（AllowedIPs），并入在线检测的 IP 列表
 getwireguard() {
-	[ -z "$wireguard_info_enable" ] && return
-	[ -z "$wireguard_interface" ] && return
+	if [ -z "$wireguard_info_enable" ]; then
+		log_change "[DEBUG] $(translate "WireGuard discovery skipped: not enabled in device_info_helper")"
+		return
+	fi
+	if [ -z "$wireguard_interface" ]; then
+		log_change "[DEBUG] $(translate "WireGuard discovery skipped: wireguard_interface is empty")"
+		return
+	fi
 	unset wireguard_iplist
 	command -v wg >/dev/null 2>&1 || {
 		log_change "[WARN] $(translate "wireguard-tools (wg command) not installed, unable to get WireGuard peer information")"
@@ -1830,7 +1881,9 @@ getwireguard() {
 		done <<<"$(run_with_tag wg show "$wg_iface" allowed-ips 2>/dev/null)"
 	done
 	wireguard_iplist=$(echo "$wireguard_iplist" | grep -v "^$" | sort -u)
+	log_change "[DEBUG] $(translate "WireGuard interfaces: %s -> peer IPs: %s" "$wireguard_interface" "$(echo "$wireguard_iplist" | tr '\n' ' ')")"
 }
+
 
 # 在线设备列表
 first() {
@@ -1855,40 +1908,47 @@ first() {
 	done
 	wait
 
-	# 参与 ARP 扫描的局域网接口列表，支持多网段（主网络、访客网络等）
-	# 手动配置优先，填的是 UCI 接口名（如 lan、guest，对应"网络"页面里看到的接口名），
-	# 而不是网桥设备名，避免用户需要自己去猜 br-guest 之类的内部设备名；
-	# 未配置时自动探测所有非 WAN 的已启用接口
-	local lan_iface_names
+	# 参与 ARP 扫描的接口，支持多网段（主网络、访客网络、经旁路/漫游路由桥接进来的其他网段等）
+	# 手动配置（lan_interface 不为空）：只扫描用户显式选中的接口，按"白名单"过滤
+	# 未手动配置：改为"黑名单"方式 —— 只排除识别到的 WAN 侧设备，其余全部纳入扫描，
+	# 这样即使某个网段没有对应的 UCI interface（比如旁路路由自己的管理网段只是透传经过网桥），
+	# 也不会因为不在"已知 LAN 接口"名单里而被漏掉
+	local IPLIST
 	if [ -n "$lan_interface" ]; then
-		local lan_iface_names="$lan_interface"
+		# 把接口名逐个解析成实际的网桥/设备名，同时兼容 device 和 l3_device 两种字段命名
+		# （不同 OpenWrt/netifd 版本字段不一致）；解析不到时兼容旧配置，直接把填的值当设备名用
+		local lan_devices=""
+		local iface_name resolved_dev
+		for iface_name in $lan_interface; do
+			[ -z "$iface_name" ] && continue
+			resolved_dev=$(ubus call network.interface."$iface_name" status 2>/dev/null | jq -r '.device // .l3_device // empty')
+			if [ -n "$resolved_dev" ] && [ "$resolved_dev" != "null" ]; then
+				lan_devices="${lan_devices}"$'\n'"${resolved_dev}"
+			else
+				lan_devices="${lan_devices}"$'\n'"${iface_name}"
+			fi
+		done
+		lan_devices=$(echo "$lan_devices" | grep -v "^$" | sort -u)
+		log_change "[DEBUG] $(translate "LAN scan (manual, allowlist): %s -> devices: %s" "$lan_interface" "$(echo "$lan_devices" | tr '\n' ' ')")"
+		IPLIST=$(cat /proc/net/arp | grep "0x2\|0x6" | grep -v "^169.254." | grep -v "^$" | awk -v devs="$lan_devices" '
+			BEGIN { n = split(devs, arr, "\n"); for (i = 1; i <= n; i++) if (arr[i] != "") dev_ok[arr[i]] = 1 }
+			($6 in dev_ok) { print $1 }
+		' | sort -u)
 	else
-		local lan_iface_names=$(ubus call network.interface dump 2>/dev/null | jq -r '.interface[] | select(.up == true and .interface != "loopback" and (.interface | test("^wan"; "i") | not)) | .interface' | sort -u)
+		local wan_iface_names=$(ubus call network.interface dump 2>/dev/null | jq -r '.interface[] | select(.interface | test("^wan"; "i")) | .interface' | sort -u)
+		local wan_devices=""
+		local iface_name resolved_dev
+		for iface_name in $wan_iface_names; do
+			resolved_dev=$(ubus call network.interface."$iface_name" status 2>/dev/null | jq -r '.device // .l3_device // empty')
+			[ -n "$resolved_dev" ] && [ "$resolved_dev" != "null" ] && wan_devices="${wan_devices}"$'\n'"${resolved_dev}"
+		done
+		wan_devices=$(echo "$wan_devices" | grep -v "^$" | sort -u)
+		log_change "[DEBUG] $(translate "LAN scan (auto, excluding WAN devices): %s" "$(echo "$wan_devices" | tr '\n' ' ')")"
+		IPLIST=$(cat /proc/net/arp | grep "0x2\|0x6" | grep -v "^169.254." | grep -v "^$" | awk -v devs="$wan_devices" '
+			BEGIN { n = split(devs, arr, "\n"); for (i = 1; i <= n; i++) if (arr[i] != "") dev_bad[arr[i]] = 1 }
+			!($6 in dev_bad) { print $1 }
+		' | sort -u)
 	fi
-
-	# 把接口名逐个解析成实际的网桥/设备名，同时兼容 device 和 l3_device 两种字段命名
-	# （不同 OpenWrt/netifd 版本字段不一致，只取 dump 里的 .device 曾导致部分接口解析不到）；
-	# 解析不到时兼容旧配置，直接把填的值当设备名用
-	local lan_devices=""
-	local iface_name resolved_dev
-	for iface_name in $lan_iface_names; do
-		[ -z "$iface_name" ] && continue
-		resolved_dev=$(ubus call network.interface."$iface_name" status 2>/dev/null | jq -r '.device // .l3_device // empty')
-		if [ -n "$resolved_dev" ] && [ "$resolved_dev" != "null" ]; then
-			lan_devices="${lan_devices}"$'\n'"${resolved_dev}"
-		else
-			lan_devices="${lan_devices}"$'\n'"${iface_name}"
-		fi
-	done
-	lan_devices=$(echo "$lan_devices" | grep -v "^$" | sort -u)
-	log_change "[DEBUG] $(translate "LAN scan interfaces: %s -> devices: %s" "$(echo "$lan_iface_names" | tr '\n' ' ')" "$(echo "$lan_devices" | tr '\n' ' ')")"
-
-	# 按接口过滤 ARP 表（第 6 列为设备名），而非仅按 br-lan 的网段字符串匹配，
-	# 这样访客网络、旁路网桥等独立网桥都能被覆盖，且不受限于 /24 掩码假设
-	local IPLIST=$(cat /proc/net/arp | grep "0x2\|0x6" | grep -v "^169.254." | grep -v "^$" | awk -v devs="$lan_devices" '
-		BEGIN { n = split(devs, arr, "\n"); for (i = 1; i <= n; i++) if (arr[i] != "") dev_ok[arr[i]] = 1 }
-		($6 in dev_ok) { print $1 }
-	' | sort -u)
 
 	local IPLIST+=$'\n'"$gateway_iplist"
 	local IPLIST+=$'\n'"$miwifi_iplist"

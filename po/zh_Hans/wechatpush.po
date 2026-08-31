@@ -1082,6 +1082,18 @@ msgstr "抓取信息时间间隔"
 msgid "Generally, frequent capturing is not necessary. Adjust it as needed."
 msgstr "一般不需要频繁抓取，酌情设置"
 
+msgid "Traffic statistics source"
+msgstr "流量统计来源"
+
+msgid "bandix-plus is an eBPF-based traffic monitor that can cover multiple interfaces (including tunnels), as an alternative to wrtbwmon. It must already be installed and running separately: <a href=\"https://github.com/timsaya/openwrt-bandix-plus\" target=\"_blank\">github.com/timsaya/openwrt-bandix-plus</a>"
+msgstr "bandix-plus 是基于 eBPF 的流量监控工具，可覆盖多网卡/隧道接口，作为 wrtbwmon 的替代方案。需要自行提前安装并运行：<a href=\"https://github.com/timsaya/openwrt-bandix-plus\" target=\"_blank\">github.com/timsaya/openwrt-bandix-plus</a>"
+
+msgid "bandix-plus API address"
+msgstr "bandix-plus API 地址"
+
+msgid "bandix-plus API port"
+msgstr "bandix-plus API 端口"
+
 #: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/advanced.js:148
 msgid "Unattended tasks"
 msgstr "无人值守任务"
@@ -1596,11 +1608,29 @@ msgstr "载入上次重启前日志"
 msgid "wrtbwmon not installed, traffic statistics unavailable"
 msgstr "未安装 wrtbwmon，流量统计不可用"
 
+msgid "bandix-plus API unreachable: %s"
+msgstr "无法连接 bandix-plus API：%s"
+
+msgid "bandix-plus API returned an error: %s"
+msgstr "bandix-plus API 返回错误：%s"
+
 msgid "wireguard-tools (wg command) not installed, unable to get WireGuard peer information"
 msgstr "未安装 wireguard-tools（wg 命令），无法获取 WireGuard 对等端信息"
 
-msgid "LAN scan interfaces: %s -> devices: %s"
-msgstr "本轮扫描接口：%s -> 对应设备：%s"
+msgid "LAN scan (manual, allowlist): %s -> devices: %s"
+msgstr "本轮扫描（手动白名单）：%s -> 对应设备：%s"
+
+msgid "LAN scan (auto, excluding WAN devices): %s"
+msgstr "本轮扫描（自动，排除 WAN 设备）：%s"
+
+msgid "WireGuard discovery skipped: not enabled in device_info_helper"
+msgstr "未在\"获取设备信息辅助\"里勾选 WireGuard，跳过对等端发现"
+
+msgid "WireGuard discovery skipped: wireguard_interface is empty"
+msgstr "wireguard_interface 未填写，跳过对等端发现"
+
+msgid "WireGuard interfaces: %s -> peer IPs: %s"
+msgstr "WireGuard 接口：%s -> 对等端 IP：%s"
 
 msgid "Cannot get iputils-arping version, please confirm if plugin is running properly"
 msgstr "无法获取依赖项 iputils-arping 版本号，请确认插件是否正常运行"

@@ -272,6 +272,23 @@ return view.extend({
 		o.depends({ device_info_helper: "openwrt_info", '!contains': true });
 		o.depends({ device_info_helper: "scan_local_ip", '!contains': true });
 
+		o = s.option(form.ListValue, 'usage_backend', _('Traffic statistics source'));
+		o.value('wrtbwmon', 'wrtbwmon');
+		o.value('bandix', 'bandix-plus');
+		o.default = 'wrtbwmon';
+		o.description = _('bandix-plus is an eBPF-based traffic monitor that can cover multiple interfaces (including tunnels), as an alternative to wrtbwmon. It must already be installed and running separately: <a href="https://github.com/timsaya/openwrt-bandix-plus" target="_blank">github.com/timsaya/openwrt-bandix-plus</a>');
+
+		o = s.option(form.Value, 'bandix_api_host', _('bandix-plus API address'));
+		o.placeholder = '127.0.0.1';
+		o.default = '127.0.0.1';
+		o.depends('usage_backend', 'bandix');
+
+		o = s.option(form.Value, 'bandix_api_port', _('bandix-plus API port'));
+		o.placeholder = '8787';
+		o.default = '8787';
+		o.datatype = 'port';
+		o.depends('usage_backend', 'bandix');
+
 		o = s.option(form.Flag, "unattended_enable", _("Unattended tasks"))
 		o.default = 0
 		o.rmempty = true
