@@ -14,21 +14,21 @@ return view.extend({
 		method: 'getHostHints',
 		expect: { '': {} }
 	}),
-
-load: function () {
-    var self = this;
-    return Promise.all([
-        this.callHostHints(),
-        rpc.call('file', 'read', { path: '/proc/net/arp' })
-            .then(function(res) {
-                return res.data || '';
-            })
-            .catch(function(err) {
-                console.error('Failed to read ARP:', err);
-                return '';  // 返回空字符串，避免页面崩溃
-            })
-    ]);
-},
+	
+    load: function() {
+        return Promise.all([
+            this.callHostHints(),
+            rpc.call('file', 'read', { path: '/proc/net/arp' })
+                .then(function(res) {
+                    return res.data || '';
+                })
+                .catch(function(err) {
+                    console.error('Failed to read ARP:', err);
+                    return '';
+                }),
+            network.getNetworks()
+        ]);
+    },
 
 	parseArp: function (data) {
 		var lines = data.split('\n'),
