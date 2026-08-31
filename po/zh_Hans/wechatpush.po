@@ -1162,6 +1162,42 @@ msgstr "单位为小时"
 msgid "Network uptime greater than"
 msgstr "网络在线时间大于"
 
+#: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/advanced.js:216
+msgid "Main title color"
+msgstr "主标题颜色"
+
+#: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/advanced.js:216
+msgid "Fill in a #RRGGBB hex color code. Leave empty to use the default #6A65FF. Only takes effect where the push channel supports simple HTML rendering (e.g. WxPusher); other channels ignore the tags."
+msgstr "填写 #RRGGBB 十六进制颜色代码，留空使用预设 #6A65FF。只在推送渠道支持简单 HTML 渲染时才会实际生效（如 WxPusher），其余渠道会原样忽略标签"
+
+#: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/advanced.js:216
+msgid "Success message color"
+msgstr "成功消息颜色"
+
+#: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/advanced.js:216
+msgid "Fill in a #RRGGBB hex color code. Leave empty to use the default #92D050."
+msgstr "填写 #RRGGBB 十六进制颜色代码，留空使用预设 #92D050"
+
+#: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/advanced.js:216
+msgid "Failure message color"
+msgstr "失败消息颜色"
+
+#: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/advanced.js:216
+msgid "Fill in a #RRGGBB hex color code. Leave empty to use the default #FF6666."
+msgstr "填写 #RRGGBB 十六进制颜色代码，留空使用预设 #FF6666"
+
+#: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/advanced.js:216
+msgid "Client name color"
+msgstr "客户端名颜色"
+
+#: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/advanced.js:216
+msgid "Module title color"
+msgstr "模块标题颜色"
+
+#: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/advanced.js:216
+msgid "Fill in a #RRGGBB hex color code. Leave empty to use the default #76CCFF. Applies to titles like the online-devices list and system status."
+msgstr "填写 #RRGGBB 十六进制颜色代码，留空使用预设 #76CCFF，作用于\"现有在线设备\"、系统状态等模块标题"
+
 #: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/client.js:70
 msgid "Connection Point"
 msgstr "连接点"

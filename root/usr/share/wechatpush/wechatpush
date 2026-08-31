@@ -55,7 +55,8 @@ read_config() {
 		"unattended_enable" "zerotier_helper" "unattended_only_on_disturb_time" "unattended_device_aliases" "network_disconnect_event" "unattended_autoreboot_mode" "autoreboot_system_uptime" "autoreboot_network_uptime" \
 		"device_info_helper" "gateway_host_url" "gateway_info_url" "gateway_logout_url" "gateway_username_id" "gateway_password_id" "gateway_username" "gateway_password" "miwifi_ip" "miwifi_password" "mikrotik_ip" "mikrotik_username" "op_host_ips" "scan_ip_range" "device_info_helper_sleeptime" \
 		"lan_interface" "wireguard_interface" \
-		"usage_backend" "bandix_api_host" "bandix_api_port"
+		"usage_backend" "bandix_api_host" "bandix_api_port" \
+		"font_title" "font_success" "font_fail" "font_client" "font_module"
 
 	(echo "$device_notification" | grep -q "online") && notification_online="true"
 	(echo "$device_notification" | grep -q "offline") && notification_offline="true"
@@ -72,6 +73,24 @@ read_config() {
 	(echo "$device_info_helper" | grep -q "wireguard_info") && wireguard_info_enable="true"
 	op_host_ips=$(echo "$op_host_ips" | sed 's/ /\n/g') 2>/dev/null
 	lan_interface=$(echo "$lan_interface" | sed 's/ /\n/g') 2>/dev/null
+
+	# 推送外观颜色：主标题(紫)/成功(绿)/失败(红)/客户端名(绿)/模块标题(淡蓝)，留空使用预设配色，
+	# 只在渠道支持简单 HTML 渲染时才会实际显色（如 WxPusher 的 HTML 内容类型），其余渠道会原样忽略标签
+	font_title="${font_title:-#6A65FF}"
+	font_success="${font_success:-#92D050}"
+	font_fail="${font_fail:-#FF6666}"
+	font_client="${font_client:-#92D050}"
+	font_module="${font_module:-#76CCFF}"
+	local _color_var
+	for _color_var in font_title font_success font_fail font_client font_module; do
+		if echo "${!_color_var}" | grep -qE '^#[0-9a-fA-F]{6}$'; then
+			eval "${_color_var}_start=\"<font color=\${${_color_var}}>\""
+			eval "${_color_var}_end=\"</font>\""
+		else
+			eval "${_color_var}_start=\"\""
+			eval "${_color_var}_end=\"\""
+		fi
+	done
 	if [ -x "/usr/bin/apk" ]; then
 		for str_version in "wrtbwmon" "iputils-arping" "curl" "iw"; do
 			eval $(echo ${str_version:0:2}"_version")=$(apk list | grep -w ^${str_version} | grep 'installed' | awk '{print $1}' | awk -F ${str_version}"-" '{print $2}') 2>/dev/null
@@ -2024,18 +2043,18 @@ up() {
 
 			if [ -z "$title" ]; then
 				local title=$(translate "%s connected to your router" "$name")
-				local content_title="${str_title_start}$(translate "New device connected")${str_title_end}"
+				local content_title="${str_title_start}${font_success_start}$(translate "New device connected")${font_success_end}${str_title_end}"
 			elif echo "$title" | grep -q "$(translate "connected to your router")"; then
 				local title="${name} ${title}"
 			else
 				local title="$(translate "Device status changed")"
-				local content_title="${str_title_start}$(translate "New device connected")${str_title_end}"
+				local content_title="${str_title_start}${font_success_start}$(translate "New device connected")${font_success_end}${str_title_end}"
 			fi
 
 			content="\
 ${str_splitline}\
 ${content_title}\
-${str_linefeed}${str_tab} - $(translate "Client Name:")${str_space}${str_space}${str_space}${str_space}${str_space}${name}\
+${str_linefeed}${str_tab} - $(translate "Client Name:")${str_space}${str_space}${str_space}${str_space}${str_space}${font_client_start}${name}${font_client_end}\
 ${str_linefeed}${str_tab} - $(translate "Client IP:")${str_space}${str_space}${str_space}${str_space}${ip}\
 ${str_linefeed}${str_tab} - $(translate "Client MAC:")${str_space}${str_space}${str_space}${str_space}${mac}\
 ${str_linefeed}${str_tab} - $(translate "Network Interface:")${str_space}${str_space}${str_space}${str_space}${str_space}${interface}"
@@ -2139,13 +2158,13 @@ current_device() {
 	[ "$logrow" -eq "0" ] && {
 		local explain="${send_content}\
 ${str_splitline}\
-${str_title_start}$(translate "Currently no online devices")${str_title_end}"
+${str_title_start}${font_module_start}$(translate "Currently no online devices")${font_module_end}${str_title_end}"
 		content="${content}${explain}${header}"
 		return
 	}
 
 	local explain="${str_splitline}\
-${str_title_start}$(translate "Currently %d online devices, details below" "$logrow")${str_title_end}"
+${str_title_start}${font_module_start}$(translate "Currently %d online devices, details below" "$logrow")${font_module_end}${str_title_end}"
 
 	local IPLIST
 	if [ -z "$defaultSortColumn" ] || [ "$defaultSortColumn" = "ip" ]; then
@@ -2218,7 +2237,7 @@ ${str_title_start}$(translate "Currently %d online devices, details below" "$log
 
 	# 表头
 	local explain="${str_splitline}\
-${str_title_start}$(translate "Currently %d online devices, details below" "$logrow")${str_title_end}"
+${str_title_start}${font_module_start}$(translate "Currently %d online devices, details below" "$logrow")${font_module_end}${str_title_end}"
 
 	local header="${str_linefeed}${str_tab}"
 	header+=$(pad_field "$(translate "IP Address")" "$ip_max")"${str_space}"
@@ -2238,7 +2257,7 @@ ${str_title_start}$(translate "Currently %d online devices, details below" "$log
 			line+=$(pad_field "${totals[i]}" "$total_max")
 		fi
 		line+=$(pad_field "${time_onlines[i]}" "$time_online_max")
-		line+="${names[i]}"
+		line+="${font_client_start}${names[i]}${font_client_end}"
 
 		# 接口/MAC 单独放在每台设备下方新的一行，而不是加宽主表格的列，
 		# 这样无论接口名或 MAC 多长，都不会把上面已经对齐好的 IP/流量/在线时间/名称列挤到换行
@@ -2318,12 +2337,12 @@ get_client_usage() {
 				
 				if [ -z "$title" ]; then
 					title=$(translate "%s abnormal traffic" "$name")
-					local content_title="${str_splitline}${str_title_start}$(translate "Device abnormal traffic")${str_title_end}"
+					local content_title="${str_splitline}${str_title_start}${font_fail_start}$(translate "Device abnormal traffic")${font_fail_end}${str_title_end}"
 				elif echo "$title" | grep -q "$(translate "abnormal traffic")"; then
 					title="${ip_name} ${title}"
 				else
 					title="$(translate "Device status changed")"
-					local content_title="${str_splitline}${str_title_start}$(translate "Device abnormal traffic")${str_title_end}"
+					local content_title="${str_splitline}${str_title_start}${font_fail_start}$(translate "Device abnormal traffic")${font_fail_end}${str_title_end}"
 				fi
 
 				local detail_upload=""
@@ -2346,7 +2365,7 @@ get_client_usage() {
 				content="\
 ${content}\
 ${content_title}\
-${str_linefeed}${str_tab} - $(translate "Client Name:")${str_space}${str_space}${str_space}${str_space}${str_space}${ip_name}\
+${str_linefeed}${str_tab} - $(translate "Client Name:")${str_space}${str_space}${str_space}${str_space}${str_space}${font_client_start}${ip_name}${font_client_end}\
 ${str_linefeed}${str_tab} - $(translate "Client IP:")${str_space}${str_space}${str_space}${str_space}${ip}\
 ${str_linefeed}${str_tab} - $(translate "Client MAC:")${str_space}${str_space}${str_space}${str_space}${mac}${ip_total}\
 ${str_linefeed}${str_tab} - $(translate "Traffic in 1 minute:")${str_space}${str_space}${str_space}${tmp_usage}${detail_upload}${detail_download}\
@@ -2856,16 +2875,16 @@ login_send() {
 		if [[ "$log_type" == *"failed"* ]]; then
 			if [ "$banned" = "1" ]; then
 				local login_title=$(translate "%s frequent %s login attempts, blocked" "$login_ip" "$log_type_short")
-				local login_content_info="${str_splitline}${str_title_start}$(translate "Frequent Login Attempts Information")${str_title_end}"
+				local login_content_info="${str_splitline}${str_title_start}${font_fail_start}$(translate "Frequent Login Attempts Information")${font_fail_end}${str_title_end}"
 				log_change "${disturb_text} $(translate "Device %s (%s) frequently attempted %s %s login, blocked" "$login_ip" "$login_ip_attribution" "$log_type_short" "$login_mode")"
 			else
 				local login_title=$(translate "%s failed %s login attempt (%s/%s)" "$login_ip" "$log_type_short" "$attempt_count" "$login_max_num")
-				local login_content_info="${str_splitline}${str_title_start}$(translate "Login Failed Information")${str_title_end}"
+				local login_content_info="${str_splitline}${str_title_start}${font_fail_start}$(translate "Login Failed Information")${font_fail_end}${str_title_end}"
 				log_change "${disturb_text} $(translate "Device %s (%s) failed %s login %s (%s/%s)" "$login_ip" "$login_ip_attribution" "$log_type_short" "$login_mode" "$attempt_count" "$login_max_num")"
 			fi
 		else
 			local login_title=$(translate "%s logged into router via %s" "$login_ip" "$log_type_short")
-			local login_content_info="${str_splitline}${str_title_start}$(translate "Login Information")${str_title_end}"
+			local login_content_info="${str_splitline}${str_title_start}${font_success_start}$(translate "Login Information")${font_success_end}${str_title_end}"
 			log_change "${disturb_text} $(translate "Device %s (%s) logged into router via %s %s" "$login_ip" "$login_ip_attribution" "$log_type_short" "$login_mode")"
 		fi
 
@@ -2912,18 +2931,18 @@ down_send() {
 
 		if [ -z "$title" ]; then
 			title=$(translate "%s disconnected" "$name")
-			content_title="${str_splitline}${str_title_start}$(translate "Device Disconnected")${str_title_end}"
+			content_title="${str_splitline}${str_title_start}${font_fail_start}$(translate "Device Disconnected")${font_fail_end}${str_title_end}"
 		elif echo "$title" | grep -q "$(translate "disconnected")"; then
 			title="${name} ${title}"
 			content_title=""
 		else
 			title="$(translate "Device Status Changed")"
-			content_title="${str_splitline}${str_title_start}$(translate "Device Disconnected")${str_title_end}"
+			content_title="${str_splitline}${str_title_start}${font_fail_start}$(translate "Device Disconnected")${font_fail_end}${str_title_end}"
 		fi
 
 		content="${content}\
 ${content_title}\
-${str_linefeed}${str_tab} - $(translate "Client Name:")${str_space}${str_space}${str_space}${str_space}${str_space}${name}\
+${str_linefeed}${str_tab} - $(translate "Client Name:")${str_space}${str_space}${str_space}${str_space}${str_space}${font_client_start}${name}${font_client_end}\
 ${str_linefeed}${str_tab} - $(translate "Client IP:")${str_space}${str_space}${str_space}${str_space}${ip}\
 ${str_linefeed}${str_tab} - $(translate "Client MAC:")${str_space}${str_space}${str_space}${str_space}${mac}${ip_total}\
 ${str_linefeed}${str_tab} - $(translate "Uptime:")${str_space}${str_space}${str_space}${str_space}${time1}"
