@@ -15,13 +15,20 @@ return view.extend({
 		expect: { '': {} }
 	}),
 
-	load: function () {
-		return Promise.all([
-			this.callHostHints(),
-			fs.read('/proc/net/arp'),
-			network.getNetworks()
-		]);
-	},
+load: function () {
+    var self = this;
+    return Promise.all([
+        this.callHostHints(),
+        rpc.call('file', 'read', { path: '/proc/net/arp' })
+            .then(function(res) {
+                return res.data || '';
+            })
+            .catch(function(err) {
+                console.error('Failed to read ARP:', err);
+                return '';  // 返回空字符串，避免页面崩溃
+            })
+    ]);
+},
 
 	parseArp: function (data) {
 		var lines = data.split('\n'),
