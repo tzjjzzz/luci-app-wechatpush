@@ -1871,9 +1871,39 @@ getmikrotik() {
 	fi
 }
 
+# 把接口名（UCI interface 名，如 lan、guest）解析成实际网桥/设备名，带缓存。
+# first() 每个轮询周期都会用到这个解析结果，如果每次都实时调用 ubus（尤其是自动模式下
+# 还要先 dump 一遍所有接口），在接口数量较多、sleeptime 设置较短时会成为明显的串行耗时瓶颈，
+# 且这个耗时发生在并发下载设备信息的线程池启动之前，调大 thread_num 对此没有任何帮助。
+# 接口的设备映射基本不会频繁变化，缓存 60 秒足够及时同时避免每轮都打满 ubus。
+resolve_iface_devices() {
+	local iface_names="$1"
+	local cache_file="$2"
+	local cache_age=999999
+	[ -f "$cache_file" ] && cache_age=$(( $(date +%s) - $(date -r "$cache_file" +%s 2>/dev/null || echo 0) ))
+
+	if [ "$cache_age" -ge 60 ]; then
+		local resolved="" iface_name resolved_dev
+		for iface_name in $iface_names; do
+			[ -z "$iface_name" ] && continue
+			resolved_dev=$(ubus call network.interface."$iface_name" status 2>/dev/null | jq -r '.device // .l3_device // empty')
+			if [ -n "$resolved_dev" ] && [ "$resolved_dev" != "null" ]; then
+				resolved="${resolved}"$'\n'"${resolved_dev}"
+			else
+				resolved="${resolved}"$'\n'"${iface_name}"
+			fi
+		done
+		echo "$resolved" | grep -v "^$" | sort -u >"$cache_file"
+	fi
+	cat "$cache_file" 2>/dev/null
+}
+
 # 获取 WireGuard 对等端信息
 # WireGuard 是纯三层隧道接口，不产生 ARP 记录，first() 中按 ARP 表扫描的方式无法发现其对等端，
-# 因此需要单独通过 wg 命令读取隧道内的对等端地址（AllowedIPs），并入在线检测的 IP 列表
+# 因此需要单独通过 wg 命令获取隧道内的对等端信息，并入在线检测的 IP 列表。
+# 注意：allowed-ips 只反映"配置了哪些对等端"，不管当前有没有连接都会列出来；
+# 真正判断当前是否连接要看 latest-handshakes 距现在的时间，只有最近握手过的对等端才视为当前在线，
+# 这样才能让下游 up()/down() 的在线检测正确反映真实的连接/断开事件
 getwireguard() {
 	if [ -z "$wireguard_info_enable" ]; then
 		log_change "[DEBUG] $(translate "WireGuard discovery skipped: not enabled in device_info_helper")"
@@ -1889,18 +1919,32 @@ getwireguard() {
 		return 1
 	}
 
-	local wg_iface pubkey allowed_ips peer_ip
+	local wg_handshake_fresh_seconds=180
+	local now=$(date +%s)
+	local wg_iface pubkey allowed_ips handshake_ts peer_ip
+	local -A pubkey_to_ip
+
 	for wg_iface in $wireguard_interface; do
-		# wg show <接口> allowed-ips 每行输出："公钥<TAB>允许的IP1/掩码,允许的IP2/掩码,..."
+		pubkey_to_ip=()
+		# 公钥 -> 对端 IP（取 AllowedIPs 里第一个 IPv4 地址），仅用于取地址，不代表在线
 		while IFS=$'\t' read -r pubkey allowed_ips; do
-			[ -z "$allowed_ips" ] && continue
-			for peer_ip in $(echo "$allowed_ips" | tr ',' '\n' | cut -d'/' -f1); do
-				echo "$peer_ip" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$' && wireguard_iplist="${wireguard_iplist}"$'\n'"${peer_ip}"
-			done
+			[ -z "$pubkey" ] && continue
+			peer_ip=$(echo "$allowed_ips" | tr ',' '\n' | cut -d'/' -f1 | grep -Em1 '^([0-9]{1,3}\.){3}[0-9]{1,3}$')
+			[ -n "$peer_ip" ] && pubkey_to_ip["$pubkey"]="$peer_ip"
 		done <<<"$(run_with_tag wg show "$wg_iface" allowed-ips 2>/dev/null)"
+
+		# 只有最近 wg_handshake_fresh_seconds 秒内握手过的对等端，才认为当前在线
+		while IFS=$'\t' read -r pubkey handshake_ts; do
+			[ -z "$pubkey" ] && continue
+			[ -z "${pubkey_to_ip[$pubkey]}" ] && continue
+			[ -z "$handshake_ts" ] && handshake_ts=0
+			if [ "$handshake_ts" -gt 0 ] && [ $((now - handshake_ts)) -le "$wg_handshake_fresh_seconds" ]; then
+				wireguard_iplist="${wireguard_iplist}"$'\n'"${pubkey_to_ip[$pubkey]}"
+			fi
+		done <<<"$(run_with_tag wg show "$wg_iface" latest-handshakes 2>/dev/null)"
 	done
 	wireguard_iplist=$(echo "$wireguard_iplist" | grep -v "^$" | sort -u)
-	log_change "[DEBUG] $(translate "WireGuard interfaces: %s -> peer IPs: %s" "$wireguard_interface" "$(echo "$wireguard_iplist" | tr '\n' ' ')")"
+	log_change "[DEBUG] $(translate "WireGuard interfaces: %s -> currently active peers (handshake within %ss): %s" "$wireguard_interface" "$wg_handshake_fresh_seconds" "$(echo "$wireguard_iplist" | tr '\n' ' ')")"
 }
 
 
@@ -1934,34 +1978,23 @@ first() {
 	# 也不会因为不在"已知 LAN 接口"名单里而被漏掉
 	local IPLIST
 	if [ -n "$lan_interface" ]; then
-		# 把接口名逐个解析成实际的网桥/设备名，同时兼容 device 和 l3_device 两种字段命名
-		# （不同 OpenWrt/netifd 版本字段不一致）；解析不到时兼容旧配置，直接把填的值当设备名用
-		local lan_devices=""
-		local iface_name resolved_dev
-		for iface_name in $lan_interface; do
-			[ -z "$iface_name" ] && continue
-			resolved_dev=$(ubus call network.interface."$iface_name" status 2>/dev/null | jq -r '.device // .l3_device // empty')
-			if [ -n "$resolved_dev" ] && [ "$resolved_dev" != "null" ]; then
-				lan_devices="${lan_devices}"$'\n'"${resolved_dev}"
-			else
-				lan_devices="${lan_devices}"$'\n'"${iface_name}"
-			fi
-		done
-		lan_devices=$(echo "$lan_devices" | grep -v "^$" | sort -u)
+		local lan_devices=$(resolve_iface_devices "$lan_interface" "${dir}/lan_devices_cache")
 		log_change "[DEBUG] $(translate "LAN scan (manual, allowlist): %s -> devices: %s" "$lan_interface" "$(echo "$lan_devices" | tr '\n' ' ')")"
 		IPLIST=$(cat /proc/net/arp | grep "0x2\|0x6" | grep -v "^169.254." | grep -v "^$" | awk -v devs="$lan_devices" '
 			BEGIN { n = split(devs, arr, "\n"); for (i = 1; i <= n; i++) if (arr[i] != "") dev_ok[arr[i]] = 1 }
 			($6 in dev_ok) { print $1 }
 		' | sort -u)
 	else
-		local wan_iface_names=$(ubus call network.interface dump 2>/dev/null | jq -r '.interface[] | select(.interface | test("^wan"; "i")) | .interface' | sort -u)
-		local wan_devices=""
-		local iface_name resolved_dev
-		for iface_name in $wan_iface_names; do
-			resolved_dev=$(ubus call network.interface."$iface_name" status 2>/dev/null | jq -r '.device // .l3_device // empty')
-			[ -n "$resolved_dev" ] && [ "$resolved_dev" != "null" ] && wan_devices="${wan_devices}"$'\n'"${resolved_dev}"
-		done
-		wan_devices=$(echo "$wan_devices" | grep -v "^$" | sort -u)
+		# 自动模式下，枚举哪些接口属于 WAN（dump 调用本身也不便宜）同样纳入缓存窗口，
+		# 只有缓存过期时才重新 dump + 解析，否则直接复用上次缓存的 WAN 设备名列表
+		local wan_cache="${dir}/wan_devices_cache"
+		local wan_cache_age=999999
+		[ -f "$wan_cache" ] && wan_cache_age=$(( $(date +%s) - $(date -r "$wan_cache" +%s 2>/dev/null || echo 0) ))
+		if [ "$wan_cache_age" -ge 60 ]; then
+			local wan_iface_names=$(ubus call network.interface dump 2>/dev/null | jq -r '.interface[] | select(.interface | test("^wan"; "i")) | .interface' | sort -u)
+			resolve_iface_devices "$wan_iface_names" "$wan_cache" >/dev/null
+		fi
+		local wan_devices=$(cat "$wan_cache" 2>/dev/null)
 		log_change "[DEBUG] $(translate "LAN scan (auto, excluding WAN devices): %s" "$(echo "$wan_devices" | tr '\n' ' ')")"
 		IPLIST=$(cat /proc/net/arp | grep "0x2\|0x6" | grep -v "^169.254." | grep -v "^$" | awk -v devs="$wan_devices" '
 			BEGIN { n = split(devs, arr, "\n"); for (i = 1; i <= n; i++) if (arr[i] != "") dev_bad[arr[i]] = 1 }
@@ -2170,19 +2203,29 @@ ${str_title_start}${font_module_start}$(translate "Currently %d online devices, 
 	if [ -z "$defaultSortColumn" ] || [ "$defaultSortColumn" = "ip" ]; then
 		# 按 IP 排序
 		IPLIST=$(jq -r '.devices[] | select(.status == "online") | .ip' "$devices_json" | sort -uV)
+	elif [ "$defaultSortColumn" = "usage" ]; then
+		# 按流量从高到低排序
+		local has_usage_presort=0
+		[ -f "${dir}/usage.db" ] && has_usage_presort=1
+		if [ "$has_usage_presort" -eq 1 ]; then
+			IPLIST=$(jq -r '.devices[] | select(.status == "online") | "\(.ip) \(.mac)"' "$devices_json" | while read -r sort_ip sort_mac; do
+				echo "$(usage get "$sort_mac" "raw") ${sort_ip}"
+			done | sort -rn | awk '{print $2}')
+		else
+			IPLIST=$(jq -r '.devices[] | select(.status == "online") | .ip' "$devices_json" | sort -uV)
+		fi
 	else
 		# 按在线时间（短到长）
 		IPLIST=$(jq -r '.devices | sort_by(-(.uptime | tonumber)) | .[] | select(.status == "online") | .ip' "$devices_json")
 	fi
 
 	# 定义数组，预处理
-	declare -a ips totals time_onlines names interfaces macs
+	declare -a ips totals time_onlines names macs
 	local idx=0
 
 	for ip in $IPLIST; do
-		local mac total name time_up time_online interface
+		local mac total name time_up time_online
 		mac=$(getmac "$ip")
-		interface=$(getinterface "$ip" "$mac")
 		if [ "$has_usage" -eq 1 ]; then
 			total=$(usage get "$mac")
 		else
@@ -2197,7 +2240,6 @@ ${str_title_start}${font_module_start}$(translate "Currently %d online devices, 
 		totals[idx]="$total"
 		time_onlines[idx]="$time_online"
 		names[idx]="$name"
-		interfaces[idx]="$(cut_str "$interface" "12")"
 		macs[idx]="$mac"
 		idx=$((idx + 1))
 	done
@@ -2245,11 +2287,16 @@ ${str_title_start}${font_module_start}$(translate "Currently %d online devices, 
 		header+=$(pad_field "$(translate "Total Traffic")" "$total_max")
 	fi
 	header+=$(pad_field "$(translate "Uptime")" "$time_online_max")
-	header+=$(translate "Client Name")
+	header+="$(translate "Client Name") MAC"
 
-	content="${content}${explain}${header}"
+	# 这部分内容会被部分推送渠道的 Markdown 解析当作代码块处理（因为每行都以固定空格开头），
+	# 代码块内不会渲染 HTML 标签（<font> 颜色标签会原样显示成文字），所以这里不用颜色，
+	# 改用分隔线区分每一台设备，即使某一行因为太长被渠道自动换行，分隔线也能让人一眼看出
+	# 上下边界属于同一台设备，不会和相邻设备的内容混在一起
+	local row_divider="${str_linefeed}----------------------------------------"
+	content="${content}${explain}${header}${row_divider}"
 
-	# 内容
+	# 内容：一台设备一行，MAC 直接跟在客户端名后面，前后各一条分隔线
 	for i in "${!ips[@]}"; do
 		local line="${str_linefeed}${str_tab}"
 		line+=$(pad_field "${ips[i]}" "$ip_max")
@@ -2257,17 +2304,9 @@ ${str_title_start}${font_module_start}$(translate "Currently %d online devices, 
 			line+=$(pad_field "${totals[i]}" "$total_max")
 		fi
 		line+=$(pad_field "${time_onlines[i]}" "$time_online_max")
-		line+="${font_client_start}${names[i]}${font_client_end}"
-
-		# 接口/MAC 单独放在每台设备下方新的一行，而不是加宽主表格的列，
-		# 这样无论接口名或 MAC 多长，都不会把上面已经对齐好的 IP/流量/在线时间/名称列挤到换行
-		local detail=""
-		[ -n "${interfaces[i]}" ] && [ "${interfaces[i]}" != "null" ] && detail="$(translate "Interface:") ${interfaces[i]}"
-		if [ -n "${macs[i]}" ] && [ "${macs[i]}" != "unknown" ]; then
-			[ -n "$detail" ] && detail="${detail}${str_space}${str_space}"
-			detail="${detail}$(translate "MAC:") ${macs[i]}"
-		fi
-		[ -n "$detail" ] && line+="${str_linefeed}${str_tab}${str_tab}${detail}"
+		line+="${names[i]}"
+		[ -n "${macs[i]}" ] && [ "${macs[i]}" != "unknown" ] && line+=" ${macs[i]}"
+		line+="${row_divider}"
 
 		content="${content}${line}"
 	done

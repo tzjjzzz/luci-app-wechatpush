@@ -28,8 +28,15 @@ return view.extend({
 	},
 
 	fetchDevices: function () {
+		var self = this;
 		var devices_path = '/tmp/wechatpush/devices.json';
-		return fs.read(devices_path).then(function (content) {
+		var usage_path = '/tmp/wechatpush/usage.db';
+		return Promise.all([
+			fs.read(devices_path),
+			fs.read(usage_path).catch(function () { return null; })
+		]).then(function (results) {
+			var content = results[0];
+			var usageContent = results[1];
 			try {
 				var data = JSON.parse(content);
 				var wlanMap = {};
@@ -40,7 +47,10 @@ return view.extend({
 						wlanMap[wlan.interface] = wlan.band;
 					});
 				}
-				
+
+				// 解析 usage.db（wrtbwmon 或 bandix-plus 产出的 CSV，格式相同），得到 mac -> 总字节数
+				var usageMap = self.parseUsageDb(usageContent);
+
 				// 解析设备的接口信息
 				data.devices.forEach(function (device) {
 					if (device.type) {
@@ -49,6 +59,12 @@ return view.extend({
 						device.interface = wlanMap[device.interface];
 					} else {
 						device.interface = "LAN";
+					}
+
+					var macKey = (device.mac || '').toLowerCase();
+					if (usageMap && Object.prototype.hasOwnProperty.call(usageMap, macKey)) {
+						device.usage_bytes = usageMap[macKey];
+						device.usage = self.formatBytes(usageMap[macKey]);
 					}
 				});
 				return { devices: data.devices };
@@ -59,13 +75,47 @@ return view.extend({
 		});
 	},
 
+	// 解析 usage.db CSV，返回 { mac(小写): 总字节数 }；没有文件或格式不对时返回 null
+	parseUsageDb: function (content) {
+		if (!content) return null;
+		var lines = content.split('\n').filter(function (l) { return l.length > 0; });
+		if (lines.length < 2) return null;
+
+		var headerCols = lines[0].split(',');
+		var macIdx = -1, totalIdx = -1;
+		headerCols.forEach(function (col, i) {
+			var c = col.trim().toLowerCase();
+			if (c === 'mac') macIdx = i;
+			if (c === 'total') totalIdx = i;
+		});
+		if (macIdx === -1 || totalIdx === -1) return null;
+
+		var map = {};
+		for (var i = 1; i < lines.length; i++) {
+			var cols = lines[i].split(',');
+			if (cols.length <= Math.max(macIdx, totalIdx)) continue;
+			var mac = (cols[macIdx] || '').trim().toLowerCase();
+			var total = parseInt(cols[totalIdx], 10);
+			if (mac && !isNaN(total)) map[mac] = total;
+		}
+		return map;
+	},
+
+	formatBytes: function (bytes) {
+		if (bytes > 1073741824) return (bytes / 1073741824).toFixed(2) + ' GB';
+		if (bytes > 1048576) return (bytes / 1048576).toFixed(2) + ' MB';
+		if (bytes > 1024) return (bytes / 1024).toFixed(2) + ' KB';
+		return bytes + ' bytes';
+	},
+
 	render: function (data) {
+		var self = this;
 		if (!data || !data.devices || !Array.isArray(data.devices)) {
 			return document.createElement('div');
 		}
 		var devices = data.devices.filter(device => device.status === 'online' || device.status === 'unknown');
 		var totalDevices = devices.length;
-		var headers = [_('Hostname'), _('IPv4 address'), _('MAC address'), _('Interfaces'), _('Connection Point'), _('Online time'), _('Details')];
+		var headers = [_('Hostname'), _('IPv4 address'), _('MAC address'), _('Interfaces'), _('Connection Point'), _('Online time'), _('Traffic')];
 		var columns = ['name', 'ip', 'mac', 'interface', 'parent', 'uptime', 'usage'];
 		var visibleColumns = [];
 		var hasData = false;
@@ -408,6 +458,8 @@ return view.extend({
 				return ipToNumber(device['ip']);
 			} else if (column === 'interface') {
 				return interfaceDisplayMap[device['interface']] || 'LAN';
+			} else if (column === 'usage') {
+				return device['usage_bytes'] || 0;
 			} else if (column === 'parent') {
 				// 使用 parent 列的实际显示值进行排序
 				if (device['parent']) {

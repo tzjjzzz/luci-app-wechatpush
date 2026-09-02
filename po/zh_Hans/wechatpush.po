@@ -1440,6 +1440,9 @@ msgstr "当前有 %d 台在线设备，具体如下"
 msgid "IP Address"
 msgstr "IP 地址"
 
+msgid "Total Traffic"
+msgstr "总流量"
+
 msgid "Uptime"
 msgstr "在线时间"
 
@@ -1665,8 +1668,8 @@ msgstr "未在\"获取设备信息辅助\"里勾选 WireGuard，跳过对等端�
 msgid "WireGuard discovery skipped: wireguard_interface is empty"
 msgstr "wireguard_interface 未填写，跳过对等端发现"
 
-msgid "WireGuard interfaces: %s -> peer IPs: %s"
-msgstr "WireGuard 接口：%s -> 对等端 IP：%s"
+msgid "WireGuard interfaces: %s -> currently active peers (handshake within %ss): %s"
+msgstr "WireGuard 接口：%s -> 当前活跃对等端（%s 秒内有握手）：%s"
 
 msgid "Cannot get iputils-arping version, please confirm if plugin is running properly"
 msgstr "无法获取依赖项 iputils-arping 版本号，请确认插件是否正常运行"
