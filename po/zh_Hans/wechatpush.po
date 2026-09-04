@@ -1671,6 +1671,27 @@ msgstr "wireguard_interface 未填写，跳过对等端发现"
 msgid "WireGuard interfaces: %s -> currently active peers (handshake within %ss): %s"
 msgstr "WireGuard 接口：%s -> 当前活跃对等端（%s 秒内有握手）：%s"
 
+msgid "WireGuard peer %s connected"
+msgstr "WireGuard 对等端 %s 已连接"
+
+msgid "WireGuard Peer Connected"
+msgstr "WireGuard 对等端已连接"
+
+msgid "WireGuard peer %s disconnected"
+msgstr "WireGuard 对等端 %s 已断开"
+
+msgid "WireGuard Peer Disconnected"
+msgstr "WireGuard 对等端已断开"
+
+msgid "Tunnel IP:"
+msgstr "隧道 IP："
+
+msgid "Endpoint:"
+msgstr "公网端点："
+
+msgid "unknown peer"
+msgstr "未知对等端"
+
 msgid "Cannot get iputils-arping version, please confirm if plugin is running properly"
 msgstr "无法获取依赖项 iputils-arping 版本号，请确认插件是否正常运行"
 
