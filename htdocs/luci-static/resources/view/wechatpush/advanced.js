@@ -6,6 +6,7 @@
 'require rpc';
 'require form';
 'require poll';
+'require network';
 
 return view.extend({
 	callHostHints: rpc.declare({
@@ -13,13 +14,21 @@ return view.extend({
 		method: 'getHostHints',
 		expect: { '': {} }
 	}),
-
-	load: function () {
-		return Promise.all([
-			this.callHostHints(),
-			fs.read('/proc/net/arp')
-		]);
-	},
+	
+    load: function() {
+        return Promise.all([
+            this.callHostHints(),
+            rpc.call('file', 'read', { path: '/proc/net/arp' })
+                .then(function(res) {
+                    return res.data || '';
+                })
+                .catch(function(err) {
+                    console.error('Failed to read ARP:', err);
+                    return '';
+                }),
+            network.getNetworks()
+        ]);
+    },
 
 	parseArp: function (data) {
 		var lines = data.split('\n'),
@@ -64,6 +73,10 @@ return view.extend({
 	render: function (data) {
 		var arpData = data[1],
 			hosts = this.parseArp(arpData),
+			lanNets = (data[2] || []).filter(function (net) {
+				var name = net.getName();
+				return name && name !== 'loopback' && !/^wan/i.test(name);
+			}),
 			m, s, o,
 			programPath = '/usr/share/wechatpush/wechatpush';
 
@@ -89,7 +102,8 @@ return view.extend({
 		o.default = "ip"
 		o.value("ip", _("IP"))
 		o.value("uptime", _("Online time"))
-		o.description = _("This will change the sorting method for both the online device list page and the sorting order in the push content.")
+		o.value("usage", _("Traffic (high to low)"))
+		o.description = _("This will change the sorting method for both the online device list page and the sorting order in the push content. Traffic sorting requires a working traffic statistics source (wrtbwmon or bandix-plus).")
 
 		o = s.option(form.Value, "soc_code", _('Custom temperature reading command'))
 		o.rmempty = true
@@ -162,11 +176,22 @@ return view.extend({
 		}, this);
 		o.depends('passive_mode', '0');
 
+		o = s.option(form.MultiValue, 'lan_interface', _('LAN interfaces to scan'));
+		lanNets.forEach(function (net) {
+			var name = net.getName(),
+				dev = net.getDevice(),
+				label = dev ? (name + ' (' + dev.getName() + ')') : name;
+			o.value(name, label);
+		});
+		o.description = _('Select which network interfaces to scan for devices, e.g. the guest network. Leave empty to auto-detect all non-WAN interfaces.');
+		o.depends('passive_mode', '0');
+
 		o = s.option(form.MultiValue, 'device_info_helper', _('Assist in obtaining device information'));
 		o.value('gateway_info', _('Retrieve hostname list from modem'));
 		o.value('miwifi_info', _('Get wireless band information and hostname from MiWiFi'));
 		o.value('mikrotik_info', _('Retrieve hostname list from modem MikroTik Router'));
 		o.value('openwrt_info', _('Get wireless band information and hostname from other OpenWrt'));
+		o.value('wireguard_info', _('Discover WireGuard peers (tunnel interfaces have no ARP records)'));
 		o.value('scan_local_ip', _('Scan local IP'));
 		o.modalonly = true;
 		o.description = _('When OpenWrt is used as a bypass gateway and cannot obtain device hostnames or a complete list of local network devices.<br/>the \"Retrieve hostname list from modem\" option has only been tested with HG5143F/HN8145V China Telecom gateways and may not be universally applicable.<br/>The \"Scan local IP\" option may not retrieve hostnames, so please use device name annotations in conjunction with it.');
@@ -233,6 +258,12 @@ return view.extend({
 		o.description = _('echo -e "\\n" | ssh-keygen -t rsa -f /root/.ssh/id_rsa -N ""<br/>ssh root@your_openwrt_ip "mkdir -p /root/.ssh && chmod 700 /root/.ssh && echo $(cat /root/.ssh/id_rsa.pub) >> /etc/dropbear/authorized_keys && chmod 600 /etc/dropbear/authorized_keys"')
 		o.depends({ device_info_helper: "openwrt_info", '!contains': true });
 
+		o = s.option(form.DynamicList, "wireguard_interface", _('WireGuard interface name(s)'));
+		o.rmempty = true;
+		o.placeholder = 'wg0';
+		o.description = _('Requires wireguard-tools (the "wg" command) to be installed. Tunnel interfaces do not produce ARP records, so peer IPs are read from "wg show &lt;interface&gt; allowed-ips" instead.');
+		o.depends({ device_info_helper: "wireguard_info", '!contains': true });
+
 		o = s.option(form.Value, "scan_ip_range", _('IP range to be scanned'))
 		o.rmempty = true
 		o.placeholder = _('192.168.1.1-192.168.1.100');
@@ -248,6 +279,23 @@ return view.extend({
 		o.depends({ device_info_helper: "mikrotik_info", '!contains': true });
 		o.depends({ device_info_helper: "openwrt_info", '!contains': true });
 		o.depends({ device_info_helper: "scan_local_ip", '!contains': true });
+
+		o = s.option(form.ListValue, 'usage_backend', _('Traffic statistics source'));
+		o.value('wrtbwmon', 'wrtbwmon');
+		o.value('bandix', 'bandix-plus');
+		o.default = 'wrtbwmon';
+		o.description = _('bandix-plus is an eBPF-based traffic monitor that can cover multiple interfaces (including tunnels), as an alternative to wrtbwmon. It must already be installed and running separately: <a href="https://github.com/timsaya/openwrt-bandix-plus" target="_blank">github.com/timsaya/openwrt-bandix-plus</a>');
+
+		o = s.option(form.Value, 'bandix_api_host', _('bandix-plus API address'));
+		o.placeholder = '127.0.0.1';
+		o.default = '127.0.0.1';
+		o.depends('usage_backend', 'bandix');
+
+		o = s.option(form.Value, 'bandix_api_port', _('bandix-plus API port'));
+		o.placeholder = '8787';
+		o.default = '8787';
+		o.datatype = 'port';
+		o.depends('usage_backend', 'bandix');
 
 		o = s.option(form.Flag, "unattended_enable", _("Unattended tasks"))
 		o.default = 0
@@ -301,6 +349,26 @@ return view.extend({
 		o.datatype = "uinteger"
 		o.description = _("Unit: hours")
 		o.depends('unattended_autoreboot_mode', '2');
+
+		o = s.option(form.Value, "font_title", _("Main title color"))
+		o.placeholder = '#6A65FF'
+		o.description = _('Fill in a #RRGGBB hex color code. Leave empty to use the default #6A65FF. Only takes effect where the push channel supports simple HTML rendering (e.g. WxPusher); other channels ignore the tags.')
+
+		o = s.option(form.Value, "font_success", _("Success message color"))
+		o.placeholder = '#92D050'
+		o.description = _('Fill in a #RRGGBB hex color code. Leave empty to use the default #92D050.')
+
+		o = s.option(form.Value, "font_fail", _("Failure message color"))
+		o.placeholder = '#FF6666'
+		o.description = _('Fill in a #RRGGBB hex color code. Leave empty to use the default #FF6666.')
+
+		o = s.option(form.Value, "font_client", _("Client name color"))
+		o.placeholder = '#92D050'
+		o.description = _('Fill in a #RRGGBB hex color code. Leave empty to use the default #92D050.')
+
+		o = s.option(form.Value, "font_module", _("Module title color"))
+		o.placeholder = '#76CCFF'
+		o.description = _('Fill in a #RRGGBB hex color code. Leave empty to use the default #76CCFF. Applies to titles like the online-devices list and system status.')
 
 		return m.render();
 	}

@@ -538,11 +538,21 @@ return view.extend({
 		o.description = _('Please ensure that you can retrieve device traffic information correctly, otherwise this feature will not work properly');
 		o.default = '0';
 
-		o = s.taboption('content', form.Value, 'client_usage_max', _('Per-minute traffic limit'));
+		o = s.taboption('content', form.ListValue, 'client_usage_window', _('Traffic alert time window'));
+		o.value('1', _('1 hour'));
+		o.value('2', _('2 hours'));
+		o.value('5', _('5 hours'));
+		o.value('12', _('12 hours'));
+		o.value('24', _('24 hours'));
+		o.default = '1';
+		o.depends('client_usage', '1');
+		o.description = _('How far back to look when checking traffic. A freshly-connected device is never compared against traffic from before it connected, so this cannot false-positive on connect.');
+
+		o = s.taboption('content', form.Value, 'client_usage_max', _('Traffic limit within the time window'));
 		o.placeholder = '10M';
 		o.rmempty = false;
 		o.depends('client_usage', '1');
-		o.description = _('Abnormal traffic alert (byte), you can append K or M');
+		o.description = _('Abnormal traffic alert (byte), you can append K, M or G. This is the total allowed within the selected time window above, not per-minute -- e.g. for a 1-hour window, "500M" means "more than 500MB within any 1-hour period".');
 
 		o = s.taboption('content', form.Flag, 'client_usage_disturb', _('Abnormal traffic do not disturb'));
 		o.default = '0';
@@ -566,6 +576,10 @@ return view.extend({
 		o.datatype = 'and(uinteger,min(0))';
 		o.depends('login_web_black', '1');
 		o.description = _('\"0\" in ipset means permanent blacklist, use with caution. If misconfigured, change the device IP and clear rules in LUCI.<br/>Note: The whitelist for bans is located under the \"Do Not Disturb\" tab.');
+
+		o = s.taboption('ipset', form.Flag, 'fail2ban_enable', _('Push fail2ban ban/unban events'));
+		o.default = '0';
+		o.description = _('Watches fail2ban\'s own log (independent of the auto-ban feature above) and pushes ban time, banned IP, jail, ban duration, and the matching local device name/MAC if the banned IP happens to belong to one of your own devices.');
 
 		o = s.taboption('ipset', form.Flag, 'port_knocking_enable', _('Port knocking'));
 		o.default = '0';
