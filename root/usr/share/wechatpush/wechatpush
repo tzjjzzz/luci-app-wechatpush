@@ -47,7 +47,7 @@ read_config() {
 		"jsonpath" "sckey" "sc3key" "sc3uid" "sc3tags" "corpid" "userid" "agentid" "corpsecret" "mediapath" "wxpusher_apptoken" "wxpusher_uids" "wxpusher_topicIds" "pushplus_token" "tg_api_server" "tg_token" "tg_chat_id" "tg_thread_id" "recipient_email" "smtp_host" "smtp_port" "smtp_tls" "smtp_starttls" "smtp_user" "smtp_passwordeval" "smtp_from" "smtp_from_full_name" \
 		"get_ipv4_mode" "ipv4_interface" "get_ipv6_mode" "ipv6_interface" \
 		"device_notification" "cpu_notification" "cpu_load_threshold" "temperature_threshold" \
-		"client_usage" "client_usage_max" "client_usage_disturb" "client_usage_whitelist" \
+		"client_usage" "client_usage_max" "client_usage_window" "client_usage_disturb" "client_usage_whitelist" \
 		"login_notification" "login_max_num" "login_web_black" "login_ip_black_timeout" "login_ip_white_list" "port_knocking_enable" "login_ip_white_timeout" "login_port_white" "login_port_forward_list" \
 		"crontab_regular_time" "crontab_interval_time" \
 		"do_not_disturb_mode" "do_not_disturb_starttime" "do_not_disturb_endtime" "up_down_push_whitelist" "up_down_push_blacklist" "up_down_push_interface" "mac_online_list" "mac_offline_list" "cpu_threshold_duration" "cpu_notification_delay" "login_disturb" "login_notification_delay" "login_log_enable" \
@@ -56,7 +56,8 @@ read_config() {
 		"device_info_helper" "gateway_host_url" "gateway_info_url" "gateway_logout_url" "gateway_username_id" "gateway_password_id" "gateway_username" "gateway_password" "miwifi_ip" "miwifi_password" "mikrotik_ip" "mikrotik_username" "op_host_ips" "scan_ip_range" "device_info_helper_sleeptime" \
 		"lan_interface" "wireguard_interface" \
 		"usage_backend" "bandix_api_host" "bandix_api_port" \
-		"font_title" "font_success" "font_fail" "font_client" "font_module"
+		"font_title" "font_success" "font_fail" "font_client" "font_module" \
+		"fail2ban_enable"
 
 	(echo "$device_notification" | grep -q "online") && notification_online="true"
 	(echo "$device_notification" | grep -q "offline") && notification_offline="true"
@@ -95,7 +96,7 @@ read_config() {
 		for str_version in "wrtbwmon" "iputils-arping" "curl" "iw"; do
 			eval $(echo ${str_version:0:2}"_version")=$(apk list | grep -w ^${str_version} | grep 'installed' | awk '{print $1}' | awk -F ${str_version}"-" '{print $2}') 2>/dev/null
 		done
-		(apk list | grep -w -q "^firewall4" | grep 'installed') && nftables_version="true"
+		(apk list | grep -w "^firewall4" | grep -q 'installed') && nftables_version="true"
 	else
 		for str_version in "wrtbwmon" "iputils-arping" "curl" "iw"; do
 			eval $(echo ${str_version:0:2}"_version")=$(opkg list-installed | grep -w ^${str_version} | awk '{print $3}') 2>/dev/null
@@ -385,6 +386,7 @@ main() {
 
 	log_change "[INFO] $(translate "Loading online devices...")"
 	silent_run monitor_logins
+	silent_run monitor_fail2ban
 	>"${dir}/send_enable.lock" && first && deltemp
 	log_change "[INFO] $(translate "Initialization completed")"
 
@@ -2397,69 +2399,85 @@ get_client_usage() {
 	[ "$client_usage_disturb" -eq "1" ] && [ -n "$client_usage_whitelist" ] && local MACLIST=$(echo "$client_usage_whitelist")
 	[ -z "$MACLIST" ] && return
 
-	if [ "$(($(date +%s) - $get_client_usage_time))" -ge "60" ]; then
-		>${dir}/client_usage_aliases
+	# 统计窗口（小时），未配置时默认 1 小时
+	local window_hours="${client_usage_window:-1}"
+	local window_seconds=$((window_hours * 3600))
+	local history_file="${dir}/client_usage_history"
+	local now=$(date +%s)
+
+	# 5 分钟才真正记录一次快照并检查一次：checking 太频繁对小时级别的窗口没有意义，
+	# 也能把历史记录文件的体积控制住
+	if [ "$((now - get_client_usage_time))" -ge "300" ]; then
+		local mac cur_total cur_in cur_out cur_has_direction
 		for mac in $MACLIST; do
-			local cur_total cur_in cur_out cur_has_direction
 			read -r cur_total cur_in cur_out cur_has_direction <<<"$(get_usage_stats "$mac")"
-			echo "$mac ${cur_total} ${cur_in} ${cur_out} ${cur_has_direction}" >>${dir}/client_usage_aliases
-			[ -f "${dir}/old_client_usage_aliases" ] || continue
-			local old_line=$(awk -v key="$mac" 'tolower($1)==tolower(key){print; exit}' "${dir}/old_client_usage_aliases" 2>/dev/null)
-			[ -z "$old_line" ] && continue
+			[ -z "$cur_total" ] && cur_total=0
+			[ -z "$cur_in" ] && cur_in=0
+			[ -z "$cur_out" ] && cur_out=0
 
-			local old_mac prev_total prev_in prev_out old_has_direction
-			read -r old_mac prev_total prev_in prev_out old_has_direction <<<"$old_line"
-			[ -z "$prev_total" ] && prev_total="0"
-			local delta_total=$((cur_total - prev_total))
-			[ "$delta_total" -lt "0" ] && continue
-			if [ "$delta_total" -ge "$client_usage_max" ]; then
-				local ip=$(jq -r --arg mac "$mac" '.devices[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase) and .status == "online") | .ip' "$devices_json")
-				local ip_name=$(getname ${ip} ${mac})
-				local tmp_usage=$(bytes_for_humans "$delta_total")
-				local time_up=$(jq -r --arg mac "$mac" '.devices[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase) and .status == "online") | .uptime' "$devices_json")
-				local ip_total=$(bytes_for_humans "$cur_total") && [ -n "$ip_total" ] && local ip_total="${str_linefeed}${str_tab} - $(translate "Total Traffic:") ${str_space}${str_space}${str_space}${str_space}${ip_total}"
-				local time1=$(date +%s)
-				local time1=$(time_for_humans $(expr ${time1} - ${time_up}))
-				
-				if [ -z "$title" ]; then
-					title=$(translate "%s abnormal traffic" "$name")
-					local content_title="${str_splitline}${str_title_start}${font_fail_start}$(translate "Device abnormal traffic")${font_fail_end}${str_title_end}"
-				elif echo "$title" | grep -q "$(translate "abnormal traffic")"; then
-					title="${ip_name} ${title}"
-				else
-					title="$(translate "Device status changed")"
-					local content_title="${str_splitline}${str_title_start}${font_fail_start}$(translate "Device abnormal traffic")${font_fail_end}${str_title_end}"
-				fi
+			# 在历史记录里找"窗口内最早"的一条快照作为对比基准。
+			# 如果这台设备在历史记录里一条都没有落在窗口内（比如刚连接不久，还没攒够
+			# 窗口时长的数据），就跳过本次检测、只记录快照，避免拿设备连接前就已经存在的
+			# 历史累计流量（尤其是 bandix 这类不按连接会话重置计数器的后端）误判成
+			# "刚连接就爆量"
+			local baseline_line=$(awk -v mac="$mac" -v cutoff="$((now - window_seconds))" \
+				'$2==mac && $1>=cutoff {print; exit}' "$history_file" 2>/dev/null)
 
-				local detail_upload=""
-				local detail_download=""
-				if [ "$cur_has_direction" = "1" ] && [ "$old_has_direction" = "1" ]; then
-					[ -z "$prev_in" ] && prev_in="0"
-					[ -z "$prev_out" ] && prev_out="0"
-					local delta_in=$((cur_in - prev_in))
-					local delta_out=$((cur_out - prev_out))
-					[ "$delta_in" -lt "0" ] && delta_in="0"
-					[ "$delta_out" -lt "0" ] && delta_out="0"
-					detail_upload="${str_linefeed}${str_tab} - $(translate "Upload Traffic:")${str_space}${str_space}$(bytes_for_humans "$delta_out")"
-					detail_download="${str_linefeed}${str_tab} - $(translate "Download Traffic:")${str_space}$(bytes_for_humans "$delta_in")"
-				fi
+			if [ -n "$baseline_line" ]; then
+				local base_ts base_mac base_total base_in base_out
+				read -r base_ts base_mac base_total base_in base_out <<<"$baseline_line"
+				local delta_total=$((cur_total - base_total))
+				if [ "$delta_total" -ge "0" ] && [ "$delta_total" -ge "$client_usage_max" ]; then
+					local ip=$(jq -r --arg mac "$mac" '.devices[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase) and .status == "online") | .ip' "$devices_json")
+					local ip_name=$(getname ${ip} ${mac})
+					local tmp_usage=$(bytes_for_humans "$delta_total")
+					local time_up=$(jq -r --arg mac "$mac" '.devices[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase) and .status == "online") | .uptime' "$devices_json")
+					local ip_total=$(bytes_for_humans "$cur_total") && [ -n "$ip_total" ] && local ip_total="${str_linefeed}${str_tab} - $(translate "Total Traffic:") ${str_space}${str_space}${str_space}${str_space}${ip_total}"
+					local time1=$(date +%s)
+					local time1=$(time_for_humans $(expr ${time1} - ${time_up}))
 
-				local detail_dbm=""
-				local wxjk_dbm=$(get_signal_dbm "$mac")
-				[ -n "$wxjk_dbm" ] && detail_dbm="${str_linefeed}${str_tab} - $(translate "Signal Strength:")${str_space}${str_space}${wxjk_dbm} dBm"
+					if [ -z "$title" ]; then
+						title=$(translate "%s abnormal traffic" "$name")
+						local content_title="${str_splitline}${str_title_start}${font_fail_start}$(translate "Device abnormal traffic")${font_fail_end}${str_title_end}"
+					elif echo "$title" | grep -q "$(translate "abnormal traffic")"; then
+						title="${ip_name} ${title}"
+					else
+						title="$(translate "Device status changed")"
+						local content_title="${str_splitline}${str_title_start}${font_fail_start}$(translate "Device abnormal traffic")${font_fail_end}${str_title_end}"
+					fi
 
-				content="\
+					local detail_upload=""
+					local detail_download=""
+					if [ "$cur_has_direction" = "1" ] && [ -n "$base_in" ] && [ -n "$base_out" ]; then
+						local delta_in=$((cur_in - base_in))
+						local delta_out=$((cur_out - base_out))
+						[ "$delta_in" -lt "0" ] && delta_in="0"
+						[ "$delta_out" -lt "0" ] && delta_out="0"
+						detail_upload="${str_linefeed}${str_tab} - $(translate "Upload Traffic:")${str_space}${str_space}$(bytes_for_humans "$delta_out")"
+						detail_download="${str_linefeed}${str_tab} - $(translate "Download Traffic:")${str_space}$(bytes_for_humans "$delta_in")"
+					fi
+
+					local detail_dbm=""
+					local wxjk_dbm=$(get_signal_dbm "$mac")
+					[ -n "$wxjk_dbm" ] && detail_dbm="${str_linefeed}${str_tab} - $(translate "Signal Strength:")${str_space}${str_space}${wxjk_dbm} dBm"
+
+					content="\
 ${content}\
 ${content_title}\
 ${str_linefeed}${str_tab} - $(translate "Client Name:")${str_space}${str_space}${str_space}${str_space}${str_space}${font_client_start}${ip_name}${font_client_end}\
 ${str_linefeed}${str_tab} - $(translate "Client IP:")${str_space}${str_space}${str_space}${str_space}${ip}\
 ${str_linefeed}${str_tab} - $(translate "Client MAC:")${str_space}${str_space}${str_space}${str_space}${mac}${ip_total}\
-${str_linefeed}${str_tab} - $(translate "Traffic in 1 minute:")${str_space}${str_space}${str_space}${tmp_usage}${detail_upload}${detail_download}\
+${str_linefeed}${str_tab} - $(translate "Traffic in %s hour(s):" "$window_hours")${str_space}${str_space}${str_space}${tmp_usage}${detail_upload}${detail_download}\
 ${str_linefeed}${str_tab} - $(translate "Uptime:")${str_space}${str_space}${str_space}${str_space}${time1}${detail_dbm}"
+				fi
 			fi
+
+			echo "$now $mac $cur_total $cur_in $cur_out" >>"$history_file"
 		done
-		cat ${dir}/client_usage_aliases >${dir}/old_client_usage_aliases
-		get_client_usage_time=$(date +%s)
+
+		# 清理超过 24 小时（当前支持的最大窗口）的历史记录，控制文件体积
+		[ -f "$history_file" ] && awk -v cutoff="$((now - 86400))" '$1>=cutoff' "$history_file" >"${history_file}.tmp" 2>/dev/null && mv "${history_file}.tmp" "$history_file"
+		get_client_usage_time=$now
 	fi
 }
 
@@ -2692,6 +2710,100 @@ monitor_logins() {
 		disown "$child_pid"
 		echo $child_pid >"${dir}/child_pid"
 	fi
+}
+
+# 监听 fail2ban 的封禁/解封事件并推送
+# fail2ban 默认可能写独立日志文件 /var/log/fail2ban.log，也可能配置成写入 syslog，两种都支持：
+# 优先跟踪独立日志文件，不存在时退回到 logread -f 里过滤 fail2ban 相关的行
+monitor_fail2ban() {
+	[ -z "$fail2ban_enable" ] && return
+	command -v fail2ban-client >/dev/null 2>&1 || {
+		log_change "[WARN] $(translate "fail2ban-client not found, unable to monitor fail2ban bans")"
+		return
+	}
+
+	cleanup_fail2ban_child() {
+		kill $fail2ban_child_pid >/dev/null 2>&1
+		wait $fail2ban_child_pid >/dev/null 2>&1
+		rm -f "${dir}/fail2ban_child_pid" >/dev/null 2>&1
+		exit 0
+	}
+	trap cleanup_fail2ban_child SIGINT SIGTERM
+
+	(
+		if [ -f "/var/log/fail2ban.log" ]; then
+			tail -n0 -F /var/log/fail2ban.log 2>/dev/null | while IFS= read -r line; do
+				process_fail2ban_line "$line"
+			done
+		else
+			run_with_tag logread -f | while IFS= read -r line; do
+				echo "$line" | grep -q "fail2ban" && process_fail2ban_line "$line"
+			done
+		fi
+	) &
+	fail2ban_child_pid=$!
+	sleep 1
+	disown "$fail2ban_child_pid"
+	echo $fail2ban_child_pid >"${dir}/fail2ban_child_pid"
+}
+
+# 解析单行 fail2ban 日志：格式固定以 "... [jail] Ban <ip>" / "... [jail] Unban <ip>" 结尾，
+# 用倒数第二个字段判断动作类型、最后一个字段取 IP，不依赖具体时间戳/进程名格式
+process_fail2ban_line() {
+	local line="$1"
+	local action=$(echo "$line" | awk '{print $(NF-1)}')
+	[ "$action" != "Ban" ] && [ "$action" != "Unban" ] && return
+
+	local jail=$(echo "$line" | sed -n 's/.*\[\([^]]*\)\] \(Ban\|Unban\).*/\1/p')
+	local ip=$(echo "$line" | awk '{print $NF}')
+	[ -z "$ip" ] && return
+
+	[ "$action" = "Ban" ] && fail2ban_send "ban" "$jail" "$ip"
+	[ "$action" = "Unban" ] && fail2ban_send "unban" "$jail" "$ip"
+}
+
+# fail2ban 封禁/解封推送
+fail2ban_send() {
+	local event="$1"
+	local jail="$2"
+	local ip="$3"
+
+	>"${dir}/send_enable.lock"
+
+	# 查封禁时长（该 jail 配置的 bantime，单位秒）
+	local bantime bantime_human=""
+	bantime=$(fail2ban-client get "$jail" bantime 2>/dev/null | tr -d '\r\n')
+	echo "$bantime" | grep -Eq '^[0-9]+$' && bantime_human=$(time_for_humans "$bantime")
+
+	# 尝试反查这个 IP 是否对应本地设备（fail2ban 封的大多是外部攻击者，查不到是正常情况）
+	local device_name_hit="" device_mac_hit=""
+	if [ -f "$devices_json" ]; then
+		device_name_hit=$(jq -r --arg ip "$ip" '.devices[] | select(.ip == $ip) | .name' "$devices_json" 2>/dev/null | head -n1)
+		device_mac_hit=$(jq -r --arg ip "$ip" '.devices[] | select(.ip == $ip) | .mac' "$devices_json" 2>/dev/null | head -n1)
+	fi
+
+	local f2b_title f2b_content_info
+	if [ "$event" = "ban" ]; then
+		f2b_title=$(translate "fail2ban banned %s (%s)" "$ip" "$jail")
+		f2b_content_info="${str_splitline}${str_title_start}${font_fail_start}$(translate "fail2ban Ban")${font_fail_end}${str_title_end}"
+	else
+		f2b_title=$(translate "fail2ban unbanned %s (%s)" "$ip" "$jail")
+		f2b_content_info="${str_splitline}${str_title_start}${font_success_start}$(translate "fail2ban Unban")${font_success_end}${str_title_end}"
+	fi
+
+	local f2b_content="${f2b_content_info}"
+	f2b_content="${f2b_content}${str_linefeed}${str_tab} - $(translate "Time:")${str_space}${str_space}${str_space}${str_space}$(date "+%Y-%m-%d %H:%M:%S")"
+	f2b_content="${f2b_content}${str_linefeed}${str_tab} - $(translate "Banned IP:")${str_space}${str_space}${ip}"
+	f2b_content="${f2b_content}${str_linefeed}${str_tab} - $(translate "Jail:")${str_space}${str_space}${jail}"
+	[ "$event" = "ban" ] && [ -n "$bantime_human" ] && f2b_content="${f2b_content}${str_linefeed}${str_tab} - $(translate "Ban Duration:")${str_space}${str_space}${bantime_human}"
+	[ -n "$device_name_hit" ] && f2b_content="${f2b_content}${str_linefeed}${str_tab} - $(translate "Device Name:")${str_space}${str_space}${device_name_hit}"
+	[ -n "$device_mac_hit" ] && f2b_content="${f2b_content}${str_linefeed}${str_tab} - $(translate "Device MAC:")${str_space}${str_space}${device_mac_hit}"
+
+	disturb
+	local disturb_RETVAL=$?
+	[ -n "$device_name" ] && f2b_title="【$device_name】$f2b_title"
+	(echo "$lite_enable" | grep -q "content") && f2b_content="$f2b_title"
+	[ "$disturb_RETVAL" -eq 0 ] && diy_send "${f2b_title}" "${f2b_content}" "${jsonpath}" >/dev/null 2>&1
 }
 
 # 处理登录事件

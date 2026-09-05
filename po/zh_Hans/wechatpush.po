@@ -534,12 +534,40 @@ msgid "Please ensure that you can retrieve device traffic information correctly,
 msgstr "请确保可以正确获取设备流量情况，否则此功能无法正常工作"
 
 #: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/config.js:462
-msgid "Per-minute traffic limit"
-msgstr "每分钟流量限制"
+msgid "Traffic alert time window"
+msgstr "流量警报统计窗口"
+
+#: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/config.js:462
+msgid "1 hour"
+msgstr "1 小时"
+
+#: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/config.js:462
+msgid "2 hours"
+msgstr "2 小时"
+
+#: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/config.js:462
+msgid "5 hours"
+msgstr "5 小时"
+
+#: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/config.js:462
+msgid "12 hours"
+msgstr "12 小时"
+
+#: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/config.js:462
+msgid "24 hours"
+msgstr "24 小时"
+
+#: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/config.js:462
+msgid "How far back to look when checking traffic. A freshly-connected device is never compared against traffic from before it connected, so this cannot false-positive on connect."
+msgstr "检测时往前回看的时间范围。刚连接的设备不会拿连接之前的历史流量来比较，所以不会出现一连接就误报的情况"
+
+#: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/config.js:462
+msgid "Traffic limit within the time window"
+msgstr "统计窗口内的流量限制"
 
 #: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/config.js:466
-msgid "Abnormal traffic alert (byte), you can append K or M"
-msgstr "设备异常流量警报（byte），你可以追加 K 或者 M"
+msgid "Abnormal traffic alert (byte), you can append K, M or G. This is the total allowed within the selected time window above, not per-minute -- e.g. for a 1-hour window, \"500M\" means \"more than 500MB within any 1-hour period\"."
+msgstr "设备异常流量警报（byte），你可以追加 K、M 或 G。这是上面所选统计窗口内允许的总量，不再是每分钟——比如窗口选 1 小时，填 \"500M\" 就表示\"任意 1 小时内超过 500MB\""
 
 #: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/config.js:468
 msgid "Abnormal traffic do not disturb"
@@ -568,6 +596,14 @@ msgstr "拉黑时间（秒）"
 #: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/config.js:489
 msgid "\"0\" in ipset means permanent blacklist, use with caution. If misconfigured, change the device IP and clear rules in LUCI.<br/>Note: The whitelist for bans is located under the \"Do Not Disturb\" tab."
 msgstr "ipset 中, \"0\" 为永久拉黑，慎用。如不幸误操作，请更改设备 IP 进入 LUCI 界面清空规则。<br/>注：封禁白名单位于 “免打扰” 选项卡。"
+
+#: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/config.js:489
+msgid "Push fail2ban ban/unban events"
+msgstr "推送 fail2ban 封禁/解封事件"
+
+#: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/config.js:489
+msgid "Watches fail2ban's own log (independent of the auto-ban feature above) and pushes ban time, banned IP, jail, ban duration, and the matching local device name/MAC if the banned IP happens to belong to one of your own devices."
+msgstr "监听 fail2ban 自身的日志（与上面的自动封禁功能相互独立），推送封禁时间、封禁 IP、jail 名称、封禁时长；如果被封的 IP 恰好是自己的本地设备，还会带上对应的设备名/MAC"
 
 #: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/config.js:491
 msgid "Port knocking"
@@ -1416,8 +1452,8 @@ msgstr "设备流量异常"
 msgid "Device status changed"
 msgstr "设备状态变化"
 
-msgid "Traffic in 1 minute:"
-msgstr "一分钟内流量："
+msgid "Traffic in %s hour(s):"
+msgstr "过去 %s 小时流量："
 
 msgid "Upload Traffic:"
 msgstr "上传流量："
@@ -1691,6 +1727,36 @@ msgstr "公网端点："
 
 msgid "unknown peer"
 msgstr "未知对等端"
+
+msgid "fail2ban-client not found, unable to monitor fail2ban bans"
+msgstr "未找到 fail2ban-client，无法监控 fail2ban 封禁事件"
+
+msgid "fail2ban banned %s (%s)"
+msgstr "fail2ban 封禁了 %s（%s）"
+
+msgid "fail2ban Ban"
+msgstr "fail2ban 封禁"
+
+msgid "fail2ban unbanned %s (%s)"
+msgstr "fail2ban 解封了 %s（%s）"
+
+msgid "fail2ban Unban"
+msgstr "fail2ban 解封"
+
+msgid "Banned IP:"
+msgstr "封禁 IP："
+
+msgid "Jail:"
+msgstr "Jail："
+
+msgid "Ban Duration:"
+msgstr "封禁时长："
+
+msgid "Device Name:"
+msgstr "设备名："
+
+msgid "Device MAC:"
+msgstr "设备 MAC："
 
 msgid "Cannot get iputils-arping version, please confirm if plugin is running properly"
 msgstr "无法获取依赖项 iputils-arping 版本号，请确认插件是否正常运行"
