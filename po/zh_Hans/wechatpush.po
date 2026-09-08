@@ -1695,8 +1695,8 @@ msgstr "未安装 wireguard-tools（wg 命令），无法获取 WireGuard 对等
 msgid "LAN scan (manual, allowlist): %s -> devices: %s"
 msgstr "本轮扫描（手动白名单）：%s -> 对应设备：%s"
 
-msgid "LAN scan (auto, excluding WAN devices): %s"
-msgstr "本轮扫描（自动，排除 WAN 设备）：%s"
+msgid "LAN scan (auto): scanning entire ARP table, no interface filtering"
+msgstr "本轮扫描（自动）：直接扫描整张 ARP 表，不做任何接口过滤"
 
 msgid "WireGuard discovery skipped: not enabled in device_info_helper"
 msgstr "未在\"获取设备信息辅助\"里勾选 WireGuard，跳过对等端发现"
@@ -1748,6 +1748,9 @@ msgstr "封禁 IP："
 
 msgid "Jail:"
 msgstr "Jail："
+
+msgid "Failed Attempts:"
+msgstr "失败尝试次数："
 
 msgid "Ban Duration:"
 msgstr "封禁时长："
