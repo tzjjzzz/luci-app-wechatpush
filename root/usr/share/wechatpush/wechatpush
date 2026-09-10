@@ -2085,19 +2085,19 @@ up() {
 		if [ "$mac" != "unknown" ] && jq -e --arg ip "$ip" --arg mac "$mac" '.devices[] | select(.ip == $ip and (.mac | ascii_downcase) == ($mac | ascii_downcase)) | .mac' "$devices_json" >/dev/null; then
 			jq --arg ip "$ip" --arg mac "$mac" '.devices |= map(if .ip == $ip then .mac = $mac | .status = "online" else . end)' "$devices_json" >"$tmp_devices_json" && mv "$tmp_devices_json" "$devices_json"
 			# 这也是一次真实的重连（此前 up() 顶部已经确认设备当前不是 online 状态），
-			# 同样要清掉流量异常检测的历史快照，原因同下面"全新设备"分支
-			[ -f "${dir}/client_usage_history" ] && {
-				awk -v mac="$mac" '$2!=mac' "${dir}/client_usage_history" >"${dir}/client_usage_history.tmp" 2>/dev/null && mv "${dir}/client_usage_history.tmp" "${dir}/client_usage_history"
+			# 同样要清掉流量异常检测的基准点，原因同下面"全新设备"分支
+			[ -f "${dir}/client_usage_baseline" ] && {
+				awk -v mac="$mac" '$1!=mac' "${dir}/client_usage_baseline" >"${dir}/client_usage_baseline.tmp" 2>/dev/null && mv "${dir}/client_usage_baseline.tmp" "${dir}/client_usage_baseline"
 			}
 		# up
 		else
 			# 剔除（重置）流量数据
 			usage down ${ip}
-			# 同时清掉这台设备在流量异常检测历史快照里的记录：如果不清，下次
-			# get_client_usage() 检查时可能会找到"断线前"留下的旧快照当基准，
-			# 把跨越了本次连接开始之前的用量也算进来，导致"刚连接没多久就报异常流量"
-			[ -n "$mac" ] && [ "$mac" != "unknown" ] && [ -f "${dir}/client_usage_history" ] && {
-				awk -v mac="$mac" '$2!=mac' "${dir}/client_usage_history" >"${dir}/client_usage_history.tmp" 2>/dev/null && mv "${dir}/client_usage_history.tmp" "${dir}/client_usage_history"
+			# 同时清掉这台设备在流量异常检测里的基准点：如果不清，下次 get_client_usage()
+			# 检查时可能会拿"断线前"留下的旧基准点来比较，把跨越了本次连接开始之前的用量
+			# 也算进来，导致"刚连接没多久就报异常流量"
+			[ -n "$mac" ] && [ "$mac" != "unknown" ] && [ -f "${dir}/client_usage_baseline" ] && {
+				awk -v mac="$mac" '$1!=mac' "${dir}/client_usage_baseline" >"${dir}/client_usage_baseline.tmp" 2>/dev/null && mv "${dir}/client_usage_baseline.tmp" "${dir}/client_usage_baseline"
 			}
 			# 删除当前 IP 对应的键值，重新写入，否则要启用 unique_by(.ip) 去重
 			jq --arg ip "$ip" 'del(.devices[] | select(.ip == $ip))' "$devices_json" >"$tmp_devices_json" && mv "$tmp_devices_json" "$devices_json"
@@ -2392,7 +2392,6 @@ get_client_usage() {
 	[ "$client_usage" -ne "1" ] && return
 	[ -z "$client_usage_max" ] && return
 
-	[ -z "$get_client_usage_time" ] && get_client_usage_time=$(date +%s)
 	(echo $client_usage_max | sed -r 's/.*(.)$/\1/' | grep -q "K\|k") && client_usage_max=$(expr ${client_usage_max%?} \* 1024)
 	(echo $client_usage_max | sed -r 's/.*(.)$/\1/' | grep -q "M\|m") && client_usage_max=$(expr ${client_usage_max%?} \* 1048576)
 	(echo $client_usage_max | sed -r 's/.*(.)$/\1/' | grep -q "G\|g") && client_usage_max=$(expr ${client_usage_max%?} \* 1073741824)
@@ -2401,86 +2400,92 @@ get_client_usage() {
 	[ "$client_usage_disturb" -eq "1" ] && [ -n "$client_usage_whitelist" ] && local MACLIST=$(echo "$client_usage_whitelist")
 	[ -z "$MACLIST" ] && return
 
-	# 统计窗口（小时），未配置时默认 1 小时
+	# 统计窗口（小时），未配置时默认 1 小时。这里用的是"固定窗口计数器"而不是滑动窗口：
+	# 每个设备维护一个基准点（上次开始计数的时间+当时的累计流量），只要从基准点到现在
+	# 累计的流量达到阈值就报警，报警后立刻把基准点重置到"现在"，重新从 0 开始累计——
+	# 而不是继续拿同一个旧基准比较，这样同一次超标不会每隔几分钟就重复报警一次；
+	# 如果一直没超标但整个窗口时长都过去了，也重置基准点，避免无限期越攒越多
 	local window_hours="${client_usage_window:-1}"
 	local window_seconds=$((window_hours * 3600))
-	local history_file="${dir}/client_usage_history"
+	local baseline_file="${dir}/client_usage_baseline"
 	local now=$(date +%s)
+	touch "$baseline_file" 2>/dev/null
 
-	# 5 分钟才真正记录一次快照并检查一次：checking 太频繁对小时级别的窗口没有意义，
-	# 也能把历史记录文件的体积控制住
-	if [ "$((now - get_client_usage_time))" -ge "300" ]; then
-		local mac cur_total cur_in cur_out cur_has_direction
-		for mac in $MACLIST; do
-			read -r cur_total cur_in cur_out cur_has_direction <<<"$(get_usage_stats "$mac")"
-			[ -z "$cur_total" ] && cur_total=0
-			[ -z "$cur_in" ] && cur_in=0
-			[ -z "$cur_out" ] && cur_out=0
+	local mac cur_total cur_in cur_out cur_has_direction
+	local new_baseline=""
+	for mac in $MACLIST; do
+		read -r cur_total cur_in cur_out cur_has_direction <<<"$(get_usage_stats "$mac")"
+		[ -z "$cur_total" ] && cur_total=0
+		[ -z "$cur_in" ] && cur_in=0
+		[ -z "$cur_out" ] && cur_out=0
 
-			# 在历史记录里找"窗口内最早"的一条快照作为对比基准。
-			# 如果这台设备在历史记录里一条都没有落在窗口内（比如刚连接不久，还没攒够
-			# 窗口时长的数据），就跳过本次检测、只记录快照，避免拿设备连接前就已经存在的
-			# 历史累计流量（尤其是 bandix 这类不按连接会话重置计数器的后端）误判成
-			# "刚连接就爆量"
-			local baseline_line=$(awk -v mac="$mac" -v cutoff="$((now - window_seconds))" \
-				'$2==mac && $1>=cutoff {print; exit}' "$history_file" 2>/dev/null)
+		local base_line=$(awk -v mac="$mac" '$1==mac{print; exit}' "$baseline_file" 2>/dev/null)
 
-			if [ -n "$baseline_line" ]; then
-				local base_ts base_mac base_total base_in base_out
-				read -r base_ts base_mac base_total base_in base_out <<<"$baseline_line"
-				local delta_total=$((cur_total - base_total))
-				if [ "$delta_total" -ge "0" ] && [ "$delta_total" -ge "$client_usage_max" ]; then
-					local ip=$(jq -r --arg mac "$mac" '.devices[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase) and .status == "online") | .ip' "$devices_json")
-					local ip_name=$(getname ${ip} ${mac})
-					local tmp_usage=$(bytes_for_humans "$delta_total")
-					local time_up=$(jq -r --arg mac "$mac" '.devices[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase) and .status == "online") | .uptime' "$devices_json")
-					local ip_total=$(bytes_for_humans "$cur_total") && [ -n "$ip_total" ] && local ip_total="${str_linefeed}${str_tab} - $(translate "Total Traffic:") ${str_space}${str_space}${str_space}${str_space}${ip_total}"
-					local time1=$(date +%s)
-					local time1=$(time_for_humans $(expr ${time1} - ${time_up}))
+		if [ -z "$base_line" ]; then
+			# 第一次见到这个设备（比如刚连接），直接把当前值作为基准点，本轮不检测
+			new_baseline="${new_baseline}"$'\n'"${mac} ${now} ${cur_total} ${cur_in} ${cur_out}"
+			continue
+		fi
 
-					if [ -z "$title" ]; then
-						title=$(translate "%s abnormal traffic" "$name")
-						local content_title="${str_splitline}${str_title_start}${font_fail_start}$(translate "Device abnormal traffic")${font_fail_end}${str_title_end}"
-					elif echo "$title" | grep -q "$(translate "abnormal traffic")"; then
-						title="${ip_name} ${title}"
-					else
-						title="$(translate "Device status changed")"
-						local content_title="${str_splitline}${str_title_start}${font_fail_start}$(translate "Device abnormal traffic")${font_fail_end}${str_title_end}"
-					fi
+		local base_mac base_ts base_total base_in base_out
+		read -r base_mac base_ts base_total base_in base_out <<<"$base_line"
+		local elapsed=$((now - base_ts))
+		local delta_total=$((cur_total - base_total))
+		[ "$delta_total" -lt "0" ] && delta_total=0
 
-					local detail_upload=""
-					local detail_download=""
-					if [ "$cur_has_direction" = "1" ] && [ -n "$base_in" ] && [ -n "$base_out" ]; then
-						local delta_in=$((cur_in - base_in))
-						local delta_out=$((cur_out - base_out))
-						[ "$delta_in" -lt "0" ] && delta_in="0"
-						[ "$delta_out" -lt "0" ] && delta_out="0"
-						detail_upload="${str_linefeed}${str_tab} - $(translate "Upload Traffic:")${str_space}${str_space}$(bytes_for_humans "$delta_out")"
-						detail_download="${str_linefeed}${str_tab} - $(translate "Download Traffic:")${str_space}$(bytes_for_humans "$delta_in")"
-					fi
+		if [ "$delta_total" -ge "$client_usage_max" ]; then
+			local ip=$(jq -r --arg mac "$mac" '.devices[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase) and .status == "online") | .ip' "$devices_json")
+			local ip_name=$(getname ${ip} ${mac})
+			local tmp_usage=$(bytes_for_humans "$delta_total")
+			local elapsed_human=$(time_for_humans "$elapsed")
+			local ip_total=$(bytes_for_humans "$cur_total") && [ -n "$ip_total" ] && local ip_total="${str_linefeed}${str_tab} - $(translate "Total Traffic:") ${str_space}${str_space}${str_space}${str_space}${ip_total}"
 
-					local detail_dbm=""
-					local wxjk_dbm=$(get_signal_dbm "$mac")
-					[ -n "$wxjk_dbm" ] && detail_dbm="${str_linefeed}${str_tab} - $(translate "Signal Strength:")${str_space}${str_space}${wxjk_dbm} dBm"
+			if [ -z "$title" ]; then
+				title=$(translate "%s traffic exceeded threshold within %s: %s" "$ip_name" "$elapsed_human" "$tmp_usage")
+				local content_title="${str_splitline}${str_title_start}${font_fail_start}$(translate "Device abnormal traffic")${font_fail_end}${str_title_end}"
+			elif echo "$title" | grep -q "$(translate "traffic exceeded")"; then
+				title="${ip_name} ${title}"
+			else
+				title="$(translate "Device status changed")"
+				local content_title="${str_splitline}${str_title_start}${font_fail_start}$(translate "Device abnormal traffic")${font_fail_end}${str_title_end}"
+			fi
 
-					content="\
+			local detail_upload=""
+			local detail_download=""
+			if [ "$cur_has_direction" = "1" ] && [ -n "$base_in" ] && [ -n "$base_out" ]; then
+				local delta_in=$((cur_in - base_in))
+				local delta_out=$((cur_out - base_out))
+				[ "$delta_in" -lt "0" ] && delta_in="0"
+				[ "$delta_out" -lt "0" ] && delta_out="0"
+				detail_upload="${str_linefeed}${str_tab} - $(translate "Upload Traffic:")${str_space}${str_space}$(bytes_for_humans "$delta_out")"
+				detail_download="${str_linefeed}${str_tab} - $(translate "Download Traffic:")${str_space}$(bytes_for_humans "$delta_in")"
+			fi
+
+			local detail_dbm=""
+			local wxjk_dbm=$(get_signal_dbm "$mac")
+			[ -n "$wxjk_dbm" ] && detail_dbm="${str_linefeed}${str_tab} - $(translate "Signal Strength:")${str_space}${str_space}${wxjk_dbm} dBm"
+
+			content="\
 ${content}\
 ${content_title}\
 ${str_linefeed}${str_tab} - $(translate "Client Name:")${str_space}${str_space}${str_space}${str_space}${str_space}${font_client_start}${ip_name}${font_client_end}\
 ${str_linefeed}${str_tab} - $(translate "Client IP:")${str_space}${str_space}${str_space}${str_space}${ip}\
 ${str_linefeed}${str_tab} - $(translate "Client MAC:")${str_space}${str_space}${str_space}${str_space}${mac}${ip_total}\
-${str_linefeed}${str_tab} - $(translate "Traffic in %s hour(s):" "$window_hours")${str_space}${str_space}${str_space}${tmp_usage}${detail_upload}${detail_download}\
-${str_linefeed}${str_tab} - $(translate "Uptime:")${str_space}${str_space}${str_space}${str_space}${time1}${detail_dbm}"
-				fi
-			fi
+${str_linefeed}${str_tab} - $(translate "Traffic within %s:" "$elapsed_human")${str_space}${str_space}${str_space}${tmp_usage}${detail_upload}${detail_download}${detail_dbm}"
 
-			echo "$now $mac $cur_total $cur_in $cur_out" >>"$history_file"
-		done
+			# 报警后重置基准点：不是清零流量统计本身，只是把"从哪个时间点开始累计"这个
+			# 报警用的基准点挪到现在，避免继续拿同一个旧基准反复触发
+			new_baseline="${new_baseline}"$'\n'"${mac} ${now} ${cur_total} ${cur_in} ${cur_out}"
+		elif [ "$elapsed" -ge "$window_seconds" ]; then
+			# 一直没超标，但整个窗口时长已经过去，也重置基准点，避免无限期累计
+			new_baseline="${new_baseline}"$'\n'"${mac} ${now} ${cur_total} ${cur_in} ${cur_out}"
+		else
+			# 还在窗口内、还没超标，保留原基准点继续累计
+			new_baseline="${new_baseline}"$'\n'"${base_line}"
+		fi
+	done
 
-		# 清理超过 24 小时（当前支持的最大窗口）的历史记录，控制文件体积
-		[ -f "$history_file" ] && awk -v cutoff="$((now - 86400))" '$1>=cutoff' "$history_file" >"${history_file}.tmp" 2>/dev/null && mv "${history_file}.tmp" "$history_file"
-		get_client_usage_time=$now
-	fi
+	echo "$new_baseline" | grep -v "^$" >"$baseline_file"
 }
 
 # ------------------------------------
@@ -3154,13 +3159,18 @@ down_send() {
 
 	local IPLIST=$(jq -r '.devices[] | select(.status == "offline") | .ip' "$devices_json" | sort -u)
 	for ip in $IPLIST; do
-		local mac=$(getmac "$ip")
+		# 直接读取设备在线时就已经存好的 mac/name，而不是在这里重新即时解析：
+		# 走到这里说明设备已经离线（多次探测失败），此时它的 ARP/DHCP 记录大概率
+		# 也已经跟着失效了，重新解析很容易失败返回 unknown，把本来已知的正确名字/MAC
+		# 覆盖掉——这正是"非 br-lan 接口断开时偶尔变成 unknown"的原因
+		local mac=$(jq -r --arg ip "$ip" '.devices[] | select(.ip == $ip and .status == "offline") | .mac' "$devices_json")
 		blackwhitelist "$mac"
 		local ip_blackwhite=$?
 		[ -z "$notification_offline" ] || [ -z "$ip_blackwhite" ] && continue
 		[ -z "$ip_blackwhite" ] || [ "$ip_blackwhite" -ne "0" ] && continue
 
-		local name=$(getname "$ip" "$mac")
+		local name=$(jq -r --arg ip "$ip" '.devices[] | select(.ip == $ip and .status == "offline") | .name' "$devices_json")
+		[ -z "$name" ] || [ "$name" = "null" ] && name=$(getname "$ip" "$mac")
 		local time_up=$(jq -r --arg ip "$ip" '.devices[] | select(.ip == $ip and .status == "offline") | .uptime' "$devices_json")
 		local ip_total=$(usage get "$mac")
 		[ -n "$ip_total" ] && ip_total="${str_linefeed}${str_tab} - $(translate "Total Traffic:") ${str_space}${str_space}${str_space}${str_space}${ip_total}"

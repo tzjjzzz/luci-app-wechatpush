@@ -546,7 +546,7 @@ return view.extend({
 		o.value('24', _('24 hours'));
 		o.default = '1';
 		o.depends('client_usage', '1');
-		o.description = _('How far back to look when checking traffic. A freshly-connected device is never compared against traffic from before it connected, so this cannot false-positive on connect.');
+		o.description = _('Alerts as soon as traffic since the last check-in exceeds the limit below (not necessarily waiting for the full window) -- e.g. with a 1-hour window, exceeding the limit after only 34 minutes still alerts immediately. After alerting, the counter resets and starts fresh; it also resets if the full window passes without exceeding the limit. A freshly-connected device always starts counting from zero, so this cannot false-positive on connect or reconnect.');
 
 		o = s.taboption('content', form.Value, 'client_usage_max', _('Traffic limit within the time window'));
 		o.placeholder = '10M';

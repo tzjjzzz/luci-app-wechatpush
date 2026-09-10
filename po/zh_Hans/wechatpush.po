@@ -558,8 +558,8 @@ msgid "24 hours"
 msgstr "24 小时"
 
 #: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/config.js:462
-msgid "How far back to look when checking traffic. A freshly-connected device is never compared against traffic from before it connected, so this cannot false-positive on connect."
-msgstr "检测时往前回看的时间范围。刚连接的设备不会拿连接之前的历史流量来比较，所以不会出现一连接就误报的情况"
+msgid "Alerts as soon as traffic since the last check-in exceeds the limit below (not necessarily waiting for the full window) -- e.g. with a 1-hour window, exceeding the limit after only 34 minutes still alerts immediately. After alerting, the counter resets and starts fresh; it also resets if the full window passes without exceeding the limit. A freshly-connected device always starts counting from zero, so this cannot false-positive on connect or reconnect."
+msgstr "只要距上次计数以来的流量超过下面设置的限制就立刻报警（不需要等满整个窗口时长）——比如窗口选 1 小时，34 分钟就超标了也会立即报警。报警后计数会重新从 0 开始；如果一直没超标但整个窗口时长都过去了，也会重新开始计数。设备刚连接/重新连接时都会从 0 开始计数，不会因为连接前的历史流量而误报"
 
 #: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/config.js:462
 msgid "Traffic limit within the time window"
@@ -1452,8 +1452,14 @@ msgstr "设备流量异常"
 msgid "Device status changed"
 msgstr "设备状态变化"
 
-msgid "Traffic in %s hour(s):"
-msgstr "过去 %s 小时流量："
+msgid "%s traffic exceeded threshold within %s: %s"
+msgstr "%s 在 %s 内流量超过 %s"
+
+msgid "traffic exceeded"
+msgstr "流量超过"
+
+msgid "Traffic within %s:"
+msgstr "%s内流量："
 
 msgid "Upload Traffic:"
 msgstr "上传流量："
