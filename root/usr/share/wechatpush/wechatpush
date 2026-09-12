@@ -2421,8 +2421,17 @@ get_client_usage() {
 
 		local base_line=$(awk -v mac="$mac" '$1==mac{print; exit}' "$baseline_file" 2>/dev/null)
 
+		if [ "$cur_total" -le "0" ]; then
+			# 这一轮没能拿到有效的流量读数（可能是设备真的还没有流量，也可能是
+			# usage.db 这一轮暂时没查到这个 mac，比如 bandix 短暂抖动/接口还没同步）。
+			# 这两种情况没法区分，所以干脆不在 0 上建立/更新基准——避免把 0 当成基准点，
+			# 导致下一轮读到真实累计值时，被误判成"这段时间内瞬间爆量"
+			[ -n "$base_line" ] && new_baseline="${new_baseline}"$'\n'"${base_line}"
+			continue
+		fi
+
 		if [ -z "$base_line" ]; then
-			# 第一次见到这个设备（比如刚连接），直接把当前值作为基准点，本轮不检测
+			# 第一次拿到这个设备的有效流量读数，把当前值作为基准点，本轮不检测
 			new_baseline="${new_baseline}"$'\n'"${mac} ${now} ${cur_total} ${cur_in} ${cur_out}"
 			continue
 		fi
@@ -2430,8 +2439,20 @@ get_client_usage() {
 		local base_mac base_ts base_total base_in base_out
 		read -r base_mac base_ts base_total base_in base_out <<<"$base_line"
 		local elapsed=$((now - base_ts))
+		[ "$elapsed" -le "0" ] && elapsed=1
 		local delta_total=$((cur_total - base_total))
 		[ "$delta_total" -lt "0" ] && delta_total=0
+
+		# 合理性检查：算出来的速率如果高到物理上不可能（这里取约 2Gbps 持续速率作为
+		# 上限，对绝大多数家庭网络已经很宽裕），大概率是流量统计后端本身出现了跳变/抖动
+		# （不限于上面处理的"基准恰好卡在0"这一种情况），而不是真的在这么短时间内传了
+		# 这么多。这种情况不报警，只是悄悄把基准重置到当前值
+		local rate_bps=$((delta_total / elapsed))
+		if [ "$rate_bps" -gt "268435456" ]; then
+			log_change "[WARN] $(translate "Ignored an implausible traffic jump for %s: %s within %s, treated as a stats backend glitch and baseline reset" "$mac" "$(bytes_for_humans "$delta_total")" "$(time_for_humans "$elapsed")")"
+			new_baseline="${new_baseline}"$'\n'"${mac} ${now} ${cur_total} ${cur_in} ${cur_out}"
+			continue
+		fi
 
 		if [ "$delta_total" -ge "$client_usage_max" ]; then
 			local ip=$(jq -r --arg mac "$mac" '.devices[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase) and .status == "online") | .ip' "$devices_json")

@@ -1458,6 +1458,9 @@ msgstr "%s 在 %s 内流量超过 %s"
 msgid "traffic exceeded"
 msgstr "流量超过"
 
+msgid "Ignored an implausible traffic jump for %s: %s within %s, treated as a stats backend glitch and baseline reset"
+msgstr "忽略了 %s 一次不合理的流量跳变（%s 内 %s），判定为流量统计后端本身的抖动，已重置基准"
+
 msgid "Traffic within %s:"
 msgstr "%s内流量："
 
