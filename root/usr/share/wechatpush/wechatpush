@@ -1921,7 +1921,13 @@ getwireguard() {
 		return 1
 	}
 
-	local wg_handshake_fresh_seconds=180
+	# WireGuard 协议本身的 REKEY-AFTER-TIME 是 120 秒、REJECT-AFTER-TIME 是 180 秒
+	# （只要还有数据/保活包在发送，大约每 120 秒就会重新握手一次）。
+	# 这里的新鲜度窗口如果刚好等于 180 秒（跟协议自身的硬边界完全贴脸），
+	# 轮询周期的时间误差、WireGuard 自身握手时机的 jitter，随便一点点偏差就会
+	# 被误判成"断开"，即使已经配置了 PersistentKeepalive 也一样会来回抖动。
+	# 放宽到 300 秒，在两个协议时间常量之上留出充分余量
+	local wg_handshake_fresh_seconds=300
 	local now=$(date +%s)
 	local state_file="${dir}/wireguard_state"
 	local new_state=""
@@ -1933,18 +1939,30 @@ getwireguard() {
 		while IFS=$'\t' read -r pubkey psk endpoint allowed_ips handshake_ts rx tx keepalive; do
 			[ -z "$pubkey" ] && continue
 			[ -z "$handshake_ts" ] && handshake_ts=0
+			[ -z "$rx" ] && rx=0
+			[ -z "$tx" ] && tx=0
 			peer_ip=$(echo "$allowed_ips" | tr ',' '\n' | cut -d'/' -f1 | grep -Em1 '^([0-9]{1,3}\.){3}[0-9]{1,3}$')
+
+			local old_line=""
+			[ -f "$state_file" ] && old_line=$(awk -v key="$pubkey" -F'\t' '$1==key{print; exit}' "$state_file" 2>/dev/null)
+			local old_active=$(echo "$old_line" | cut -f2)
+			local old_rx=$(echo "$old_line" | cut -f6)
+			local old_tx=$(echo "$old_line" | cut -f7)
+			[ -z "$old_rx" ] && old_rx=0
+			[ -z "$old_tx" ] && old_tx=0
 
 			active=0
 			if [ "$handshake_ts" -gt 0 ] && [ $((now - handshake_ts)) -le "$wg_handshake_fresh_seconds" ]; then
 				active=1
-				[ -n "$peer_ip" ] && wireguard_iplist="${wireguard_iplist}"$'\n'"${peer_ip}"
+			elif [ "$rx" -gt "$old_rx" ] || [ "$tx" -gt "$old_tx" ]; then
+				# 握手时间超出了新鲜度窗口，但收发字节数比上一轮还在涨，说明隧道其实
+				# 还在正常传数据（哪怕只是保活包），不完全依赖握手时间点这一个信号
+				active=1
 			fi
-			new_state="${new_state}"$'\n'"${pubkey}"$'\t'"${active}"$'\t'"${peer_ip}"$'\t'"${endpoint}"$'\t'"${wg_iface}"
+			[ "$active" = "1" ] && [ -n "$peer_ip" ] && wireguard_iplist="${wireguard_iplist}"$'\n'"${peer_ip}"
+			new_state="${new_state}"$'\n'"${pubkey}"$'\t'"${active}"$'\t'"${peer_ip}"$'\t'"${endpoint}"$'\t'"${wg_iface}"$'\t'"${rx}"$'\t'"${tx}"
 
-			if [ -f "$state_file" ]; then
-				local old_line=$(awk -v key="$pubkey" -F'\t' '$1==key{print; exit}' "$state_file" 2>/dev/null)
-				local old_active=$(echo "$old_line" | cut -f2)
+			if [ -n "$old_line" ]; then
 				if [ "$active" = "1" ] && [ "$old_active" != "1" ]; then
 					wireguard_send "connected" "$peer_ip" "$endpoint" "$wg_iface"
 				elif [ "$active" = "0" ] && [ "$old_active" = "1" ]; then
@@ -2442,17 +2460,6 @@ get_client_usage() {
 		[ "$elapsed" -le "0" ] && elapsed=1
 		local delta_total=$((cur_total - base_total))
 		[ "$delta_total" -lt "0" ] && delta_total=0
-
-		# 合理性检查：算出来的速率如果高到物理上不可能（这里取约 2Gbps 持续速率作为
-		# 上限，对绝大多数家庭网络已经很宽裕），大概率是流量统计后端本身出现了跳变/抖动
-		# （不限于上面处理的"基准恰好卡在0"这一种情况），而不是真的在这么短时间内传了
-		# 这么多。这种情况不报警，只是悄悄把基准重置到当前值
-		local rate_bps=$((delta_total / elapsed))
-		if [ "$rate_bps" -gt "268435456" ]; then
-			log_change "[WARN] $(translate "Ignored an implausible traffic jump for %s: %s within %s, treated as a stats backend glitch and baseline reset" "$mac" "$(bytes_for_humans "$delta_total")" "$(time_for_humans "$elapsed")")"
-			new_baseline="${new_baseline}"$'\n'"${mac} ${now} ${cur_total} ${cur_in} ${cur_out}"
-			continue
-		fi
 
 		if [ "$delta_total" -ge "$client_usage_max" ]; then
 			local ip=$(jq -r --arg mac "$mac" '.devices[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase) and .status == "online") | .ip' "$devices_json")
