@@ -1816,3 +1816,66 @@ msgstr "优先显示在线设备"
 
 msgid "Only effective when service is running"
 msgstr "仅在服务运行时生效"
+
+msgid "WireGuard peer %s endpoint changed"
+msgstr "WireGuard 对等端 %s 的端点 IP 已变化"
+
+msgid "WireGuard Peer Endpoint Changed"
+msgstr "WireGuard 对等端端点变化"
+
+msgid "Previous Endpoint:"
+msgstr "原端点："
+
+msgid "Upload in %s hour(s):"
+msgstr "%s 小时内上传："
+
+msgid "Download in %s hour(s):"
+msgstr "%s 小时内下载："
+
+msgid "Traffic backend provides no upload/download split, per-direction alert skipped"
+msgstr "流量统计后端不提供上下行拆分数据，已跳过分方向流量报警"
+
+msgid "WiFi device %s connected"
+msgstr "WiFi 设备 %s 已连接"
+
+msgid "WiFi device %s is currently online, not banned"
+msgstr "WiFi 设备 %s 当前在线，不执行封禁"
+
+msgid "WiFi Connection"
+msgstr "WiFi 连接"
+
+msgid "WiFi device %s frequent auth failures, blocked"
+msgstr "WiFi 设备 %s 频繁认证失败，已封禁"
+
+msgid "Frequent WiFi Auth Failures"
+msgstr "频繁 WiFi 认证失败"
+
+msgid "WiFi device %s auth failed (%s/%s)"
+msgstr "WiFi 设备 %s 认证失败（%s/%s）"
+
+msgid "WiFi Auth Failed"
+msgstr "WiFi 认证失败"
+
+msgid "WiFi Connection Reminder"
+msgstr "WiFi 连接提醒"
+
+msgid "WiFi Auth Failure Reminder"
+msgstr "WiFi 认证失败提醒"
+
+msgid "Auto-ban WiFi devices after repeated auth failures"
+msgstr "WiFi 认证失败达到次数后自动拉黑"
+
+msgid "Upload traffic limit"
+msgstr "上传流量阈值"
+
+msgid "Upload traffic time window"
+msgstr "上传流量统计时间窗"
+
+msgid "Download traffic limit"
+msgstr "下载流量阈值"
+
+msgid "Download traffic time window"
+msgstr "下载流量统计时间窗"
+
+msgid "Default SSH port"
+msgstr "默认 SSH 端口"
