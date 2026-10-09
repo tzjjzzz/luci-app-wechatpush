@@ -259,10 +259,10 @@ return view.extend({
 		o.description = _('One device per line, each with its own SSH port: \"ip:port\" (IPv6: \"[addr]:port\"); without a port, 22 is used.<br/>') + _('echo -e "\\n" | ssh-keygen -t rsa -f /root/.ssh/id_rsa -N ""<br/>ssh root@your_openwrt_ip "mkdir -p /root/.ssh && chmod 700 /root/.ssh && echo $(cat /root/.ssh/id_rsa.pub) >> /etc/dropbear/authorized_keys && chmod 600 /etc/dropbear/authorized_keys"')
 		o.depends({ device_info_helper: "openwrt_info", '!contains': true });
 
-		o = s.option(form.DynamicList, "wireguard_interface", _('WireGuard interface name(s)'));
+		o = s.option(form.DynamicList, "wireguard_exclude", _('WireGuard interfaces to exclude'));
 		o.rmempty = true;
-		o.placeholder = 'wg0';
-		o.description = _('Requires wireguard-tools (the "wg" command) to be installed. Tunnel interfaces do not produce ARP records, so peer IPs are read from "wg show &lt;interface&gt; allowed-ips" instead.');
+		o.placeholder = 'wg_vps';
+		o.description = _('All WireGuard interfaces are detected automatically (wg show interfaces). List interfaces here only if you do not want push notifications for them, e.g. a tunnel where this router is the client. Requires wireguard-tools (the \"wg\" command) to be installed.');
 		o.depends({ device_info_helper: "wireguard_info", '!contains': true });
 
 		o = s.option(form.Value, "scan_ip_range", _('IP range to be scanned'))

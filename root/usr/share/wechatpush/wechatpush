@@ -54,7 +54,7 @@ read_config() {
 		"up_timeout" "down_timeout" "timeout_retry_count" "always_check_ip_list" "only_timeout_push" "passive_mode" "thread_num" "defaultSortColumn" "soc_code" "server_host" "server_port" \
 		"unattended_enable" "zerotier_helper" "unattended_only_on_disturb_time" "unattended_device_aliases" "network_disconnect_event" "unattended_autoreboot_mode" "autoreboot_system_uptime" "autoreboot_network_uptime" \
 		"device_info_helper" "gateway_host_url" "gateway_info_url" "gateway_logout_url" "gateway_username_id" "gateway_password_id" "gateway_username" "gateway_password" "miwifi_ip" "miwifi_password" "mikrotik_ip" "mikrotik_username" "op_host_ips" "scan_ip_range" "device_info_helper_sleeptime" \
-		"lan_interface" "wireguard_interface" \
+		"lan_interface" "wireguard_exclude" \
 		"usage_backend" "bandix_api_host" "bandix_api_port" \
 		"font_title" "font_success" "font_fail" "font_client" "font_module" \
 		"fail2ban_enable"
@@ -1949,15 +1949,29 @@ getwireguard() {
 		log_change "[DEBUG] $(translate "WireGuard discovery skipped: not enabled in device_info_helper")"
 		return
 	fi
-	if [ -z "$wireguard_interface" ]; then
-		log_change "[DEBUG] $(translate "WireGuard discovery skipped: wireguard_interface is empty")"
-		return
-	fi
 	unset wireguard_iplist
 	command -v wg >/dev/null 2>&1 || {
 		log_change "[WARN] $(translate "wireguard-tools (wg command) not installed, unable to get WireGuard peer information")"
 		return 1
 	}
+
+	# 自动发现：wg show interfaces 列出系统里所有 WireGuard 接口，不需要手动填写；
+	# wireguard_exclude 里的接口（例如本机作为客户端去连 VPS 的隧道）会被跳过
+	local wireguard_interface=""
+	local wg_found wg_one wg_ex wg_skip
+	wg_found=$(run_with_tag wg show interfaces 2>/dev/null)
+	for wg_one in $wg_found; do
+		wg_skip=""
+		for wg_ex in $wireguard_exclude; do
+			[ "$wg_one" = "$wg_ex" ] && wg_skip="1"
+		done
+		[ -z "$wg_skip" ] && wireguard_interface="${wireguard_interface:+$wireguard_interface }${wg_one}"
+	done
+	if [ -z "$wireguard_interface" ]; then
+		log_change "[DEBUG] $(translate "WireGuard discovery skipped: no WireGuard interface found")"
+		: >"${dir}/wireguard_state"
+		return
+	fi
 
 	local wg_handshake_fresh_seconds=180
 	local now=$(date +%s)

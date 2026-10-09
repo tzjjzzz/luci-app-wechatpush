@@ -1916,3 +1916,12 @@ msgstr "被封禁的 WiFi 设备保持封禁的时长，最长约 49 天。"
 
 msgid "One device per line, each with its own SSH port: \"ip:port\" (IPv6: \"[addr]:port\"); without a port, 22 is used.<br/>"
 msgstr "每行一台设备，端口各自独立：“ip:端口”（IPv6 写 “[地址]:端口”），不写端口则为 22。<br/>"
+
+msgid "WireGuard discovery skipped: no WireGuard interface found"
+msgstr "未发现 WireGuard 接口，跳过对等端发现"
+
+msgid "WireGuard interfaces to exclude"
+msgstr "排除的 WireGuard 接口"
+
+msgid "All WireGuard interfaces are detected automatically (wg show interfaces). List interfaces here only if you do not want push notifications for them, e.g. a tunnel where this router is the client. Requires wireguard-tools (the \"wg\" command) to be installed."
+msgstr "所有 WireGuard 接口会自动发现（wg show interfaces）。只有不想收到推送的接口才需要填在这里，例如本机作为客户端去连接 VPS 的隧道。需要安装 wireguard-tools（wg 命令）。"
