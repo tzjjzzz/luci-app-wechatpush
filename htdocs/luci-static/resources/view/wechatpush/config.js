@@ -534,36 +534,22 @@ return view.extend({
 		o.datatype = 'and(uinteger,min(1))';
 		o.depends({ login_notification: "web_login_failed", '!contains': true });
 		o.depends({ login_notification: "ssh_login_failed", '!contains': true });
-		o.depends({ login_notification: "wifi_auth_failed", '!contains': true });
 		o.description = _('Send notification after exceeding the count, and optionally auto-ban IP');
 
 		o = s.taboption('content', form.Flag, 'client_usage', _('Device abnormal traffic alert'));
 		o.description = _('Please ensure that you can retrieve device traffic information correctly, otherwise this feature will not work properly');
 		o.default = '0';
 
-		o = s.taboption('content', form.ListValue, 'client_usage_window', _('Traffic alert time window'));
-		o.value('1', _('1 hour'));
-		o.value('2', _('2 hours'));
-		o.value('5', _('5 hours'));
-		o.value('12', _('12 hours'));
-		o.value('24', _('24 hours'));
-		o.default = '1';
-		o.depends('client_usage', '1');
-		o.description = _('How far back to look when checking traffic. A freshly-connected device is never compared against traffic from before it connected, so this cannot false-positive on connect.');
-
 		o = s.taboption('content', form.Value, 'client_usage_up_max', _('Upload traffic limit'));
 		o.placeholder = '500M';
 		o.rmempty = true;
 		o.depends('client_usage', '1');
-		o.description = _('Upload and download are checked independently; whichever exceeds its own limit within its own time window triggers a push, and only that direction is reset afterwards. Append K, M or G. Leave both empty to use the combined limit below. Needs a traffic backend that reports upload/download separately.');
+		o.description = _('Upload and download are checked independently; whichever exceeds its own limit within its own time window triggers a push, and only that direction is reset afterwards. Append K, M or G. Needs a traffic backend that reports upload/download separately.');
 
-		o = s.taboption('content', form.ListValue, 'client_usage_up_window', _('Upload traffic time window'));
-		o.value('1', _('1 hour'));
-		o.value('2', _('2 hours'));
-		o.value('5', _('5 hours'));
-		o.value('12', _('12 hours'));
-		o.value('24', _('24 hours'));
-		o.default = '1';
+		o = s.taboption('content', form.Value, 'client_usage_up_window', _('Upload time window (minutes)'));
+		o.placeholder = '60';
+		o.default = '60';
+		o.datatype = 'range(5,1440)';
 		o.depends('client_usage', '1');
 
 		o = s.taboption('content', form.Value, 'client_usage_down_max', _('Download traffic limit'));
@@ -571,18 +557,10 @@ return view.extend({
 		o.rmempty = true;
 		o.depends('client_usage', '1');
 
-		o = s.taboption('content', form.ListValue, 'client_usage_down_window', _('Download traffic time window'));
-		o.value('1', _('1 hour'));
-		o.value('2', _('2 hours'));
-		o.value('5', _('5 hours'));
-		o.value('12', _('12 hours'));
-		o.value('24', _('24 hours'));
-		o.default = '2';
-		o.depends('client_usage', '1');
-
-		o = s.taboption('content', form.Value, 'client_usage_max', _('Traffic limit within the time window'));
-		o.placeholder = '10M';
-		o.rmempty = true;
+		o = s.taboption('content', form.Value, 'client_usage_down_window', _('Download time window (minutes)'));
+		o.placeholder = '120';
+		o.default = '120';
+		o.datatype = 'range(5,1440)';
 		o.depends('client_usage', '1');
 		o.description = _('Abnormal traffic alert (byte), you can append K, M or G. This is the total allowed within the selected time window above, not per-minute -- e.g. for a 1-hour window, "500M" means "more than 500MB within any 1-hour period".');
 
@@ -612,7 +590,19 @@ return view.extend({
 		o = s.taboption('ipset', form.Flag, 'wifi_auto_ban', _('Auto-ban WiFi devices after repeated auth failures'));
 		o.default = '0';
 		o.depends({ login_notification: "wifi_auth_failed", '!contains': true });
-		o.description = _('When one WiFi device (by MAC) reaches the login failure count, it is kicked and banned via hostapd for the blacklisting time (not persistent across hostapd/router restarts, max about 49 days; devices currently online are never banned).');
+		o.description = _('Independent of the \"Auto-ban illegal login devices\" switch above. A device (by MAC) is kicked and banned via hostapd; the ban is not persistent across hostapd/router restarts, and devices currently online are never banned.');
+
+		o = s.taboption('ipset', form.Value, 'wifi_max_num', _('WiFi auth failure count'));
+		o.default = '3';
+		o.datatype = 'and(uinteger,min(1))';
+		o.depends('wifi_auto_ban', '1');
+		o.description = _('Failures of the same device within a row (cleared by a successful connection); repeated log lines within 10 seconds count once.');
+
+		o = s.taboption('ipset', form.Value, 'wifi_ban_timeout', _('WiFi ban time (minutes)'));
+		o.default = '60';
+		o.datatype = 'range(1,71582)';
+		o.depends('wifi_auto_ban', '1');
+		o.description = _('How long a banned WiFi device stays blocked. Maximum about 49 days.');
 
 		o = s.taboption('ipset', form.Flag, 'fail2ban_enable', _('Push fail2ban ban/unban events'));
 		o.default = '0';

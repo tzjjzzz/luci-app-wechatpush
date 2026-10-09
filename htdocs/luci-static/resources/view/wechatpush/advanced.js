@@ -255,14 +255,8 @@ return view.extend({
 
 		o = s.option(form.DynamicList, "op_host_ips", _('OpenWrt IP Address'));
 		o.rmempty = true;
-		o.description = _('echo -e "\\n" | ssh-keygen -t rsa -f /root/.ssh/id_rsa -N ""<br/>ssh root@your_openwrt_ip "mkdir -p /root/.ssh && chmod 700 /root/.ssh && echo $(cat /root/.ssh/id_rsa.pub) >> /etc/dropbear/authorized_keys && chmod 600 /etc/dropbear/authorized_keys"')
-		o.depends({ device_info_helper: "openwrt_info", '!contains': true });
-
-		o = s.option(form.Value, "op_host_port", _('Default SSH port'));
-		o.rmempty = true;
-		o.placeholder = '22';
-		o.datatype = 'port';
-		o.description = _('SSH port used for the OpenWrt IPs above. A single device can override it by writing it as "ip:port" (IPv6: "[addr]:port").');
+		o.placeholder = '192.168.1.2:22';
+		o.description = _('One device per line, each with its own SSH port: \"ip:port\" (IPv6: \"[addr]:port\"); without a port, 22 is used.<br/>') + _('echo -e "\\n" | ssh-keygen -t rsa -f /root/.ssh/id_rsa -N ""<br/>ssh root@your_openwrt_ip "mkdir -p /root/.ssh && chmod 700 /root/.ssh && echo $(cat /root/.ssh/id_rsa.pub) >> /etc/dropbear/authorized_keys && chmod 600 /etc/dropbear/authorized_keys"')
 		o.depends({ device_info_helper: "openwrt_info", '!contains': true });
 
 		o = s.option(form.DynamicList, "wireguard_interface", _('WireGuard interface name(s)'));

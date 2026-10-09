@@ -1868,14 +1868,51 @@ msgstr "WiFi 认证失败达到次数后自动拉黑"
 msgid "Upload traffic limit"
 msgstr "上传流量阈值"
 
-msgid "Upload traffic time window"
-msgstr "上传流量统计时间窗"
-
 msgid "Download traffic limit"
 msgstr "下载流量阈值"
 
-msgid "Download traffic time window"
-msgstr "下载流量统计时间窗"
 
-msgid "Default SSH port"
-msgstr "默认 SSH 端口"
+msgid "within %s min uploaded over %s"
+msgstr "在 %s 分钟内上传超过 %s"
+
+msgid "within %s min downloaded over %s"
+msgstr "在 %s 分钟内下载超过 %s"
+
+msgid "within %s hour(s) traffic over %s"
+msgstr "在 %s 小时内流量超过 %s"
+
+msgid "Upload in %s min:"
+msgstr "%s 分钟内上传："
+
+msgid "Download in %s min:"
+msgstr "%s 分钟内下载："
+
+msgid "collecting"
+msgstr "统计中"
+
+msgid "Upload time window (minutes)"
+msgstr "上传统计时间窗（分钟）"
+
+msgid "Download time window (minutes)"
+msgstr "下载统计时间窗（分钟）"
+
+msgid "Upload and download are checked independently; whichever exceeds its own limit within its own time window triggers a push, and only that direction is reset afterwards. Append K, M or G. Needs a traffic backend that reports upload/download separately."
+msgstr "上传和下载分别独立判断：任意一个方向在自己的时间窗内超过自己的阈值就推送，并且只重置该方向。可加 K、M、G 后缀。需要流量统计后端能区分上下行。"
+
+msgid "WiFi auth failure count"
+msgstr "WiFi 认证失败次数"
+
+msgid "WiFi ban time (minutes)"
+msgstr "WiFi 封禁时长（分钟）"
+
+msgid "Independent of the \"Auto-ban illegal login devices\" switch above. A device (by MAC) is kicked and banned via hostapd; the ban is not persistent across hostapd/router restarts, and devices currently online are never banned."
+msgstr "与上面的“自动封禁非法登录设备”开关互相独立。设备（按 MAC）会被踢出并通过 hostapd 封禁；封禁在 hostapd/路由器重启后失效，当前在线的设备不会被封禁。"
+
+msgid "Failures of the same device within a row (cleared by a successful connection); repeated log lines within 10 seconds count once."
+msgstr "同一设备连续认证失败的次数（成功连接后清零）；10 秒内重复的日志只算一次。"
+
+msgid "How long a banned WiFi device stays blocked. Maximum about 49 days."
+msgstr "被封禁的 WiFi 设备保持封禁的时长，最长约 49 天。"
+
+msgid "One device per line, each with its own SSH port: \"ip:port\" (IPv6: \"[addr]:port\"); without a port, 22 is used.<br/>"
+msgstr "每行一台设备，端口各自独立：“ip:端口”（IPv6 写 “[地址]:端口”），不写端口则为 22。<br/>"
