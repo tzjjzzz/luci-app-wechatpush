@@ -1816,3 +1816,178 @@ msgstr "优先显示在线设备"
 
 msgid "Only effective when service is running"
 msgstr "仅在服务运行时生效"
+
+msgid "WireGuard peer %s endpoint changed"
+msgstr "WireGuard 对等端 %s 的端点 IP 已变化"
+
+msgid "WireGuard Peer Endpoint Changed"
+msgstr "WireGuard 对等端端点变化"
+
+msgid "Previous Endpoint:"
+msgstr "原端点："
+
+msgid "Upload in %s hour(s):"
+msgstr "%s 小时内上传："
+
+msgid "Download in %s hour(s):"
+msgstr "%s 小时内下载："
+
+msgid "Traffic backend provides no upload/download split, per-direction alert skipped"
+msgstr "流量统计后端不提供上下行拆分数据，已跳过分方向流量报警"
+
+msgid "WiFi device %s connected"
+msgstr "WiFi 设备 %s 已连接"
+
+msgid "WiFi device %s is currently online, not banned"
+msgstr "WiFi 设备 %s 当前在线，不执行封禁"
+
+msgid "WiFi Connection"
+msgstr "WiFi 连接"
+
+msgid "WiFi device %s frequent auth failures, blocked"
+msgstr "WiFi 设备 %s 频繁认证失败，已封禁"
+
+msgid "Frequent WiFi Auth Failures"
+msgstr "频繁 WiFi 认证失败"
+
+msgid "WiFi device %s auth failed (%s/%s)"
+msgstr "WiFi 设备 %s 认证失败（%s/%s）"
+
+msgid "WiFi Auth Failed"
+msgstr "WiFi 认证失败"
+
+msgid "WiFi Connection Reminder"
+msgstr "WiFi 连接提醒"
+
+msgid "WiFi Auth Failure Reminder"
+msgstr "WiFi 认证失败提醒"
+
+msgid "Auto-ban WiFi devices after repeated auth failures"
+msgstr "WiFi 认证失败达到次数后自动拉黑"
+
+msgid "Upload traffic limit"
+msgstr "上传流量阈值"
+
+msgid "Download traffic limit"
+msgstr "下载流量阈值"
+
+
+msgid "within %s min uploaded over %s"
+msgstr "在 %s 分钟内上传超过 %s"
+
+msgid "within %s min downloaded over %s"
+msgstr "在 %s 分钟内下载超过 %s"
+
+msgid "within %s hour(s) traffic over %s"
+msgstr "在 %s 小时内流量超过 %s"
+
+msgid "Upload in %s min:"
+msgstr "%s 分钟内上传："
+
+msgid "Download in %s min:"
+msgstr "%s 分钟内下载："
+
+msgid "collecting"
+msgstr "统计中"
+
+msgid "Upload time window (minutes)"
+msgstr "上传统计时间窗（分钟）"
+
+msgid "Download time window (minutes)"
+msgstr "下载统计时间窗（分钟）"
+
+msgid "Upload and download are checked independently; whichever exceeds its own limit within its own time window triggers a push, and only that direction is reset afterwards. Append K, M or G. Needs a traffic backend that reports upload/download separately."
+msgstr "上传和下载分别独立判断：任意一个方向在自己的时间窗内超过自己的阈值就推送，并且只重置该方向。可加 K、M、G 后缀。需要流量统计后端能区分上下行。"
+
+msgid "WiFi auth failure count"
+msgstr "WiFi 认证失败次数"
+
+msgid "WiFi ban time (minutes)"
+msgstr "WiFi 封禁时长（分钟）"
+
+
+
+msgid "How long a banned WiFi device stays blocked. Maximum about 49 days."
+msgstr "被封禁的 WiFi 设备保持封禁的时长，最长约 49 天。"
+
+msgid "One device per line, each with its own SSH port: \"ip:port\" (IPv6: \"[addr]:port\"); without a port, 22 is used.<br/>"
+msgstr "每行一台设备，端口各自独立：“ip:端口”（IPv6 写 “[地址]:端口”），不写端口则为 22。<br/>"
+
+msgid "WireGuard discovery skipped: no WireGuard interface found"
+msgstr "未发现 WireGuard 接口，跳过对等端发现"
+
+msgid "WireGuard interfaces to exclude"
+msgstr "排除的 WireGuard 接口"
+
+msgid "All WireGuard interfaces are detected automatically (wg show interfaces). List interfaces here only if you do not want push notifications for them, e.g. a tunnel where this router is the client. Requires wireguard-tools (the \"wg\" command) to be installed."
+msgstr "所有 WireGuard 接口会自动发现（wg show interfaces）。只有不想收到推送的接口才需要填在这里，例如本机作为客户端去连接 VPS 的隧道。需要安装 wireguard-tools（wg 命令）。"
+
+
+msgid "WiFi auth failure: %s (%s/%s)"
+msgstr "WiFi 认证失败：%s（%s/%s）"
+
+msgid "WiFi ban of %s could not be confirmed (hostapd_cli missing or hostapd rejected it)"
+msgstr "无法确认已封禁 %s（缺少 hostapd_cli，或 hostapd 拒绝了封禁）"
+
+msgid "WiFi device %s banned for %s minutes (%s)"
+msgstr "WiFi 设备 %s 已封禁 %s 分钟（%s）"
+
+msgid "WiFi ban expired, device %s unbanned"
+msgstr "WiFi 封禁已到期，设备 %s 已解封"
+
+msgid "WiFi device %s frequent auth failures, ban could not be confirmed"
+msgstr "WiFi 设备 %s 频繁认证失败，但封禁未能确认生效"
+
+msgid "Independent of the \"Auto-ban illegal login devices\" switch above. A device (by MAC) is kicked and banned via hostapd (deny list / ubus); \"banned\" is only reported after the ban is confirmed. The ban is lost when hostapd or the router restarts."
+msgstr "与上面的“自动封禁非法登录设备”开关互相独立。设备（按 MAC）会被踢出并通过 hostapd（拒绝列表 / ubus）封禁；只有确认封禁生效后才会推送“已封禁”。hostapd 或路由器重启后封禁失效。"
+
+msgid "Failures of the same device (every matching hostapd log line counts once; one wrong-password attempt may log several lines)."
+msgstr "同一设备的认证失败次数（每条匹配的 hostapd 失败日志都记一次；一次错误密码的连接可能打出多行日志）。"
+
+msgid "WiFi ban whitelist"
+msgstr "WiFi 封禁白名单"
+
+msgid "Devices listed here are never banned for WiFi auth failures (the failure is still pushed). Devices that use a randomized MAC need that exact MAC."
+msgstr "这里的设备永远不会因 WiFi 认证失败被封禁（失败仍会推送）。使用随机 MAC 的设备需要填它当前使用的那个 MAC。"
+
+msgid "WiFi device %s is in the ban whitelist, not banned"
+msgstr "WiFi 设备 %s 在封禁白名单中，不封禁"
+
+
+
+
+msgid "WiFi ban of %s synced to OpenWrt %s"
+msgstr "已把对 %s 的 WiFi 封禁同步到 OpenWrt %s"
+
+msgid "OpenWrt %s has no hostapd, ban sync skipped"
+msgstr "OpenWrt %s 没有 hostapd，跳过封禁同步"
+
+msgid "WiFi ban of %s could not be synced to OpenWrt %s (SSH failed or ban not confirmed)"
+msgstr "无法把对 %s 的 WiFi 封禁同步到 OpenWrt %s（SSH 失败或封禁未确认）"
+
+msgid "Sync WiFi bans to these OpenWrt devices"
+msgstr "同步 WiFi 封禁到这些 OpenWrt"
+
+msgid "When the WiFi auto-ban (Auto-ban tab) bans a device, also ban it on the OpenWrt devices listed above over SSH, so it cannot just join them. Only OpenWrt devices running hostapd are supported; others are skipped."
+msgstr "WiFi 自动封禁（“自动封禁”页）封禁某个设备时，也通过 SSH 在上面列出的 OpenWrt 上封禁它，避免它直接去连这些设备。仅支持运行 hostapd 的 OpenWrt，其余会被跳过。"
+
+msgid "Also block banned WiFi devices in the firewall"
+msgstr "同时在防火墙中拦截被封禁的 WiFi 设备"
+
+msgid "Drops all traffic from the banned MAC at this router, so a banned device gets no network even if it joins another access point (any brand, bridge/AP mode). Does not work if the other access point runs in router mode. Requires nftables (firewall4)."
+msgstr "在本路由丢弃被封 MAC 的所有流量：即使它连上了别的 AP（任意品牌，桥接/AP 模式），也拿不到网络。对方 AP 是路由模式时无效。需要 nftables（firewall4）。"
+
+msgid "Ban methods:"
+msgstr "封禁方式："
+
+msgid "Local WiFi"
+msgstr "本机无线"
+
+msgid "Firewall"
+msgstr "防火墙"
+
+msgid "WiFi device %s blocked in firewall for %s minutes"
+msgstr "WiFi 设备 %s 已在防火墙中封禁 %s 分钟"
+
+msgid "Firewall-level WiFi ban needs nftables (firewall4), skipped"
+msgstr "防火墙级 WiFi 封禁需要 nftables（firewall4），已跳过"

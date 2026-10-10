@@ -47,14 +47,14 @@ read_config() {
 		"jsonpath" "sckey" "sc3key" "sc3uid" "sc3tags" "corpid" "userid" "agentid" "corpsecret" "mediapath" "wxpusher_apptoken" "wxpusher_uids" "wxpusher_topicIds" "pushplus_token" "tg_api_server" "tg_token" "tg_chat_id" "tg_thread_id" "recipient_email" "smtp_host" "smtp_port" "smtp_tls" "smtp_starttls" "smtp_user" "smtp_passwordeval" "smtp_from" "smtp_from_full_name" \
 		"get_ipv4_mode" "ipv4_interface" "get_ipv6_mode" "ipv6_interface" \
 		"device_notification" "cpu_notification" "cpu_load_threshold" "temperature_threshold" \
-		"client_usage" "client_usage_max" "client_usage_window" "client_usage_disturb" "client_usage_whitelist" \
-		"login_notification" "login_max_num" "login_web_black" "login_ip_black_timeout" "login_ip_white_list" "port_knocking_enable" "login_ip_white_timeout" "login_port_white" "login_port_forward_list" \
+		"client_usage" "client_usage_max" "client_usage_window" "client_usage_up_max" "client_usage_up_window" "client_usage_up_minutes" "client_usage_down_max" "client_usage_down_window" "client_usage_down_minutes" "client_usage_disturb" "client_usage_whitelist" \
+		"login_notification" "wifi_auto_ban" "wifi_max_num" "wifi_ban_timeout" "wifi_ban_whitelist" "wifi_ban_sync" "wifi_ban_net" "login_max_num" "login_web_black" "login_ip_black_timeout" "login_ip_white_list" "port_knocking_enable" "login_ip_white_timeout" "login_port_white" "login_port_forward_list" \
 		"crontab_regular_time" "crontab_interval_time" \
 		"do_not_disturb_mode" "do_not_disturb_starttime" "do_not_disturb_endtime" "up_down_push_whitelist" "up_down_push_blacklist" "up_down_push_interface" "mac_online_list" "mac_offline_list" "cpu_threshold_duration" "cpu_notification_delay" "login_disturb" "login_notification_delay" "login_log_enable" \
 		"up_timeout" "down_timeout" "timeout_retry_count" "always_check_ip_list" "only_timeout_push" "passive_mode" "thread_num" "defaultSortColumn" "soc_code" "server_host" "server_port" \
 		"unattended_enable" "zerotier_helper" "unattended_only_on_disturb_time" "unattended_device_aliases" "network_disconnect_event" "unattended_autoreboot_mode" "autoreboot_system_uptime" "autoreboot_network_uptime" \
 		"device_info_helper" "gateway_host_url" "gateway_info_url" "gateway_logout_url" "gateway_username_id" "gateway_password_id" "gateway_username" "gateway_password" "miwifi_ip" "miwifi_password" "mikrotik_ip" "mikrotik_username" "op_host_ips" "scan_ip_range" "device_info_helper_sleeptime" \
-		"lan_interface" "wireguard_interface" \
+		"lan_interface" "wireguard_exclude" \
 		"usage_backend" "bandix_api_host" "bandix_api_port" \
 		"font_title" "font_success" "font_fail" "font_client" "font_module" \
 		"fail2ban_enable"
@@ -67,6 +67,8 @@ read_config() {
 	(echo "$login_notification" | grep -q "ssh_logged") && ssh_logged="true"
 	(echo "$login_notification" | grep -q "web_login_failed") && web_login_failed="true"
 	(echo "$login_notification" | grep -q "ssh_login_failed") && ssh_login_failed="true"
+	(echo "$login_notification" | grep -q "wifi_connected") && wifi_connected="true"
+	(echo "$login_notification" | grep -q "wifi_auth_failed") && wifi_auth_failed="true"
 	(echo "$device_info_helper" | grep -q "gateway_info") && gateway_info_enable="true"
 	(echo "$device_info_helper" | grep -q "miwifi_info") && miwifi_info_enable="true"
 	(echo "$device_info_helper" | grep -q "mikrotik_info") && mikrotik_info_enable="true"
@@ -246,7 +248,7 @@ init() {
 	/usr/libexec/wechatpush-call "down_oui"
 
 	# 文件清理
-	rm -f "${dir}/sheep_usage" "${dir}/old_sheep_usage" "${dir}/client_usage_aliases" "${dir}/old_client_usage_aliases" "/usr/share/wechatpush/errlog" "${dir}/temp_err" >/dev/null 2>&1
+	rm -f "${dir}/client_usage_reset" "${dir}/sheep_usage" "${dir}/old_sheep_usage" "${dir}/client_usage_aliases" "${dir}/old_client_usage_aliases" "/usr/share/wechatpush/errlog" "${dir}/temp_err" >/dev/null 2>&1
 	LockFile unlock
 
 	# 防火墙初始化
@@ -424,6 +426,9 @@ main() {
 
 		# 硬盘检测
 		#[ ! -f "${dir}/send_enable.lock" ] && get_disk
+
+		# WiFi 封禁到期解封
+		wifi_unban_expired
 
 		# 异常流量检测
 		[ ! -f "${dir}/send_enable.lock" ] && get_client_usage
@@ -1740,6 +1745,23 @@ getmiwifi() {
 	fi
 }
 
+# 远程 OpenWrt 的 SSH 端口：每个列表项各自写成 "ip:端口" 或 "[ipv6]:端口"，不写端口则为 22
+# 用法: op_ssh_target <列表项>  -> 输出 "主机 端口"
+op_ssh_target() {
+	local entry="$1" host port
+	if echo "$entry" | grep -Eq '^\[.*\]:[0-9]+$'; then
+		host=$(echo "$entry" | sed -E 's/^\[(.*)\]:[0-9]+$/\1/')
+		port=$(echo "$entry" | sed -E 's/^.*\]:([0-9]+)$/\1/')
+	elif echo "$entry" | grep -Eq '^[^:]+:[0-9]+$'; then
+		host="${entry%%:*}"
+		port="${entry##*:}"
+	else
+		host=$(echo "$entry" | tr -d '[]')
+		port="22"
+	fi
+	echo "$host $port"
+}
+
 # 从 openwrt 获取设备信息
 getopenwrt() {
 	[ -z "$openwrt_info_enable" ] && return
@@ -1747,16 +1769,18 @@ getopenwrt() {
 	if [ "$last_openwrt_time" -ge "$device_info_helper_sleeptime" ]; then
 		# 初始化一个空数组（bash 数组）
 		local json_array=()
-		for op_host_ip in $op_host_ips; do
-			local wlan_interfaces=$(run_with_tag ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -i /root/.ssh/id_rsa root@$op_host_ip 'iw dev 2>/dev/null | grep Interface | awk '\''{print $2}'\''')
-			local leases_info=$(run_with_tag ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -i /root/.ssh/id_rsa root@$op_host_ip "cat /tmp/dhcp.leases 2>/dev/null")
-			local arp_info=$(run_with_tag ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -i /root/.ssh/id_rsa root@$op_host_ip "cat /proc/net/arp | grep '0x[26]' | grep -v '^169.254.' | grep -v '^$' | sort -u 2>/dev/null")
+		for op_host_entry in $op_host_ips; do
+			local op_host_ip op_host_sshport
+			read -r op_host_ip op_host_sshport <<<"$(op_ssh_target "$op_host_entry")"
+			local wlan_interfaces=$(run_with_tag ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -p "$op_host_sshport" -i /root/.ssh/id_rsa root@$op_host_ip 'iw dev 2>/dev/null | grep Interface | awk '\''{print $2}'\''')
+			local leases_info=$(run_with_tag ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -p "$op_host_sshport" -i /root/.ssh/id_rsa root@$op_host_ip "cat /tmp/dhcp.leases 2>/dev/null")
+			local arp_info=$(run_with_tag ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -p "$op_host_sshport" -i /root/.ssh/id_rsa root@$op_host_ip "cat /proc/net/arp | grep '0x[26]' | grep -v '^169.254.' | grep -v '^$' | sort -u 2>/dev/null")
 			local openwrt_arp_iplist+="$(echo "$arp_info" | awk '{print $1}')"$'\n'
 
 			# 遍历每个接口
 			for iface in $wlan_interfaces; do
 				# 获取接口信息
-				local info=$(run_with_tag ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -i /root/.ssh/id_rsa root@$op_host_ip "iw dev $iface info 2>/dev/null")
+				local info=$(run_with_tag ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -p "$op_host_sshport" -i /root/.ssh/id_rsa root@$op_host_ip "iw dev $iface info 2>/dev/null")
 
 				# 获取频道和频段
 				local channel=$(echo "$info" | grep channel | awk '{print $2}')
@@ -1768,7 +1792,7 @@ getopenwrt() {
 				fi
 
 				# 获取连接的设备列表
-				local devices=$(run_with_tag ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -i /root/.ssh/id_rsa root@$op_host_ip "iw dev $iface station dump 2>/dev/null")
+				local devices=$(run_with_tag ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -p "$op_host_sshport" -i /root/.ssh/id_rsa root@$op_host_ip "iw dev $iface station dump 2>/dev/null")
 
 				# 逐行输出设备信息
 				while read -r line; do
@@ -1906,13 +1930,26 @@ resolve_iface_devices() {
 # up()/down() 检测并不可靠。因此改为独立判断：用 wg show <接口> dump 一次性拿到每个对等端的
 # 公钥、端点（对方公网地址）、AllowedIPs（隧道内网地址）、最近握手时间，与上一轮状态比较，
 # 握手时间从"很久以前/从未"变为"最近"视为连接，反过来视为断开，直接推送，不依赖 ping 确认
+# 取 endpoint 的主机部分（去掉端口）。支持 1.2.3.4:51820 与 [2001:db8::1]:51820
+wg_endpoint_host() {
+	local ep="$1"
+	case "$ep" in
+		\[*\]:*) ep="${ep#\[}"; echo "${ep%%\]*}" ;;
+		*) echo "${ep%:*}" ;;
+	esac
+}
+
+# 两个 endpoint 的 IP 是否不同；任一方为空/(none) 时视为"无法比较"，返回不同=1 以外的结果（即不提醒）
+wg_endpoint_ip_changed() {
+	local old="$1" new="$2"
+	[ -z "$old" ] || [ "$old" = "(none)" ] && return 1
+	[ -z "$new" ] || [ "$new" = "(none)" ] && return 1
+	[ "$(wg_endpoint_host "$old")" != "$(wg_endpoint_host "$new")" ]
+}
+
 getwireguard() {
 	if [ -z "$wireguard_info_enable" ]; then
 		log_change "[DEBUG] $(translate "WireGuard discovery skipped: not enabled in device_info_helper")"
-		return
-	fi
-	if [ -z "$wireguard_interface" ]; then
-		log_change "[DEBUG] $(translate "WireGuard discovery skipped: wireguard_interface is empty")"
 		return
 	fi
 	unset wireguard_iplist
@@ -1921,11 +1958,29 @@ getwireguard() {
 		return 1
 	}
 
+	# 自动发现：wg show interfaces 列出系统里所有 WireGuard 接口，不需要手动填写；
+	# wireguard_exclude 里的接口（例如本机作为客户端去连 VPS 的隧道）会被跳过
+	local wireguard_interface=""
+	local wg_found wg_one wg_ex wg_skip
+	wg_found=$(run_with_tag wg show interfaces 2>/dev/null)
+	for wg_one in $wg_found; do
+		wg_skip=""
+		for wg_ex in $wireguard_exclude; do
+			[ "$wg_one" = "$wg_ex" ] && wg_skip="1"
+		done
+		[ -z "$wg_skip" ] && wireguard_interface="${wireguard_interface:+$wireguard_interface }${wg_one}"
+	done
+	if [ -z "$wireguard_interface" ]; then
+		log_change "[DEBUG] $(translate "WireGuard discovery skipped: no WireGuard interface found")"
+		: >"${dir}/wireguard_state"
+		return
+	fi
+
 	local wg_handshake_fresh_seconds=180
 	local now=$(date +%s)
 	local state_file="${dir}/wireguard_state"
 	local new_state=""
-	local wg_iface pubkey psk endpoint allowed_ips handshake_ts rx tx keepalive peer_ip active
+	local wg_iface pubkey psk endpoint allowed_ips handshake_ts rx tx keepalive peer_ip active last_seen
 
 	for wg_iface in $wireguard_interface; do
 		# 第一行是接口自身信息（私钥/公钥/监听端口/fwmark），跳过；
@@ -1935,20 +1990,41 @@ getwireguard() {
 			[ -z "$handshake_ts" ] && handshake_ts=0
 			peer_ip=$(echo "$allowed_ips" | tr ',' '\n' | cut -d'/' -f1 | grep -Em1 '^([0-9]{1,3}\.){3}[0-9]{1,3}$')
 
+			# 在线判定：只看"最近握手"不可靠——设备挂机、只有保活包时握手可能很久才刷新一次，
+			# 会被误判为断开，一有真实访问又"重新连接"。所以同时参考"接收字节数是否在增长"
+			# （保活包也会让它增长），两者任一在 wg_handshake_fresh_seconds 内有过动静就算在线。
+			local old_line="" old_active="" old_endpoint="" old_rx="" old_seen=""
+			if [ -f "$state_file" ]; then
+				old_line=$(awk -v key="$pubkey" -F'\t' '$1==key{print; exit}' "$state_file" 2>/dev/null)
+				old_active=$(echo "$old_line" | cut -f2)
+				old_endpoint=$(echo "$old_line" | cut -f4)
+				old_rx=$(echo "$old_line" | cut -f6)
+				old_seen=$(echo "$old_line" | cut -f7)
+			fi
+			[ -z "$rx" ] && rx=0
+			last_seen=${old_seen:-0}
+			[ "$handshake_ts" -gt "$last_seen" ] && last_seen=$handshake_ts
+			# 接收字节数变大 = 刚收到过对端的包；变小（接口重启、计数器清零）只当作新的基准，不算动静
+			[ -n "$old_rx" ] && [ "$rx" -gt "$old_rx" ] && last_seen=$now
 			active=0
-			if [ "$handshake_ts" -gt 0 ] && [ $((now - handshake_ts)) -le "$wg_handshake_fresh_seconds" ]; then
+			if [ "$last_seen" -gt 0 ] && [ $((now - last_seen)) -le "$wg_handshake_fresh_seconds" ]; then
 				active=1
 				[ -n "$peer_ip" ] && wireguard_iplist="${wireguard_iplist}"$'\n'"${peer_ip}"
 			fi
-			new_state="${new_state}"$'\n'"${pubkey}"$'\t'"${active}"$'\t'"${peer_ip}"$'\t'"${endpoint}"$'\t'"${wg_iface}"
+			new_state="${new_state}"$'\n'"${pubkey}"$'\t'"${active}"$'\t'"${peer_ip}"$'\t'"${endpoint}"$'\t'"${wg_iface}"$'\t'"${rx}"$'\t'"${last_seen}"
 
 			if [ -f "$state_file" ]; then
-				local old_line=$(awk -v key="$pubkey" -F'\t' '$1==key{print; exit}' "$state_file" 2>/dev/null)
-				local old_active=$(echo "$old_line" | cut -f2)
 				if [ "$active" = "1" ] && [ "$old_active" != "1" ]; then
-					wireguard_send "connected" "$peer_ip" "$endpoint" "$wg_iface"
+					wireguard_send "connected" "$peer_ip" "$endpoint" "$wg_iface" "$old_endpoint"
 				elif [ "$active" = "0" ] && [ "$old_active" = "1" ]; then
-					wireguard_send "disconnected" "$(echo "$old_line" | cut -f3)" "$(echo "$old_line" | cut -f4)" "$wg_iface"
+					wireguard_send "disconnected" "$(echo "$old_line" | cut -f3)" "$old_endpoint" "$wg_iface"
+				elif [ "$active" = "1" ] && [ "$old_active" = "1" ]; then
+					# 连接状态没变，但对端公网 IP 变了（典型场景：手机从流量切到 WiFi，
+					# 握手后 wg 的 endpoint 立刻换成新地址）。只比较 IP、忽略端口，
+					# 因为 NAT 重映射换端口很常见，不应单独触发提醒
+					if wg_endpoint_ip_changed "$old_endpoint" "$endpoint"; then
+						wireguard_send "endpoint_changed" "$peer_ip" "$endpoint" "$wg_iface" "$old_endpoint"
+					fi
 				fi
 			fi
 		done <<<"$(run_with_tag wg show "$wg_iface" dump 2>/dev/null | tail -n +2)"
@@ -1965,6 +2041,7 @@ wireguard_send() {
 	local peer_ip="$2"
 	local endpoint="$3"
 	local wg_iface="$4"
+	local old_endpoint="$5"
 	local peer_label="$peer_ip"
 	[ -z "$peer_label" ] && peer_label="${endpoint%%:*}"
 	[ -z "$peer_label" ] && peer_label="$(translate "unknown peer")"
@@ -1975,6 +2052,9 @@ wireguard_send() {
 	if [ "$event" = "connected" ]; then
 		wg_title=$(translate "WireGuard peer %s connected" "$peer_label")
 		wg_content_info="${str_splitline}${str_title_start}${font_success_start}$(translate "WireGuard Peer Connected")${font_success_end}${str_title_end}"
+	elif [ "$event" = "endpoint_changed" ]; then
+		wg_title=$(translate "WireGuard peer %s endpoint changed" "$peer_label")
+		wg_content_info="${str_splitline}${str_title_start}${font_fail_start}$(translate "WireGuard Peer Endpoint Changed")${font_fail_end}${str_title_end}"
 	else
 		wg_title=$(translate "WireGuard peer %s disconnected" "$peer_label")
 		wg_content_info="${str_splitline}${str_title_start}${font_fail_start}$(translate "WireGuard Peer Disconnected")${font_fail_end}${str_title_end}"
@@ -1985,9 +2065,14 @@ wireguard_send() {
 	[ -n "$peer_ip" ] && wg_content_ip="${str_linefeed}${str_tab} - $(translate "Tunnel IP:")${str_space}${str_space}${peer_ip}"
 	local wg_content_endpoint=""
 	[ -n "$endpoint" ] && [ "$endpoint" != "(none)" ] && wg_content_endpoint="${str_linefeed}${str_tab} - $(translate "Endpoint:")${str_space}${str_space}${endpoint}"
+	local wg_content_old_endpoint=""
+	# 重新连接时若对端 IP 与断开前不同也一并标出，方便判断是不是换了网络
+	if [ "$event" = "endpoint_changed" ] || { [ "$event" = "connected" ] && wg_endpoint_ip_changed "$old_endpoint" "$endpoint"; }; then
+		wg_content_old_endpoint="${str_linefeed}${str_tab} - $(translate "Previous Endpoint:")${str_space}${str_space}${old_endpoint}"
+	fi
 	local wg_content_iface="${str_linefeed}${str_tab} - $(translate "Interface:")${str_space}${str_space}${wg_iface}"
 
-	local wg_content="${wg_content_info}${wg_content_time}${wg_content_ip}${wg_content_endpoint}${wg_content_iface}"
+	local wg_content="${wg_content_info}${wg_content_time}${wg_content_ip}${wg_content_old_endpoint}${wg_content_endpoint}${wg_content_iface}"
 
 	disturb
 	local disturb_RETVAL=$?
@@ -2384,29 +2469,77 @@ unattended() {
 	fi
 }
 
+# 把 "500M" / "2G" / "10K" / 纯数字 转成字节数，非法输入输出空
+parse_bytes() {
+	local v="$1" num unit
+	[ -z "$v" ] && return
+	unit=$(echo "$v" | sed -r 's/.*(.)$/\1/')
+	case "$unit" in
+		[Kk]) num=${v%?}; echo $((num * 1024)) ;;
+		[Mm]) num=${v%?}; echo $((num * 1048576)) ;;
+		[Gg]) num=${v%?}; echo $((num * 1073741824)) ;;
+		*) num=$v; echo $((num + 0)) ;;
+	esac 2>/dev/null
+}
+
+# 窗口内的流量增量。基准 = "窗口起点"与"该方向上次触发重置时间"中较晚者之后的第一条快照；
+# 窗口内没有快照（设备刚上线、还没攒够窗口时长）时不输出，避免把连接前就存在的累计流量误判成爆量。
+# 参数: $1 MAC  $2 方向 up|down|total  $3 窗口(秒)  $4 当前累计值  $5 历史文件里的列号(3=总 4=下行 5=上行)
+# 依赖调用者(get_client_usage)里的局部变量 now / history_file / reset_file
+usage_delta() {
+	local mac="$1" d="$2" win="$3" cur="$4" col="$5" cutoff last_reset base delta
+	last_reset=$(awk -v m="$mac" -v d="$d" '$1==m && $2==d{t=$3} END{print t+0}' "$reset_file" 2>/dev/null)
+	last_reset=${last_reset:-0}
+	cutoff=$((now - win)); [ "$last_reset" -gt "$cutoff" ] && cutoff=$last_reset
+	# 只接受有效的基准行：总流量>0；方向列(4=下行/5=上行)不能是 -1(记录时后端没给方向数据)，
+	# 也不能出现"总流量>0 但上下行都是 0"(统计后端那一刻没读到方向数据)。
+	# 这类行如果当基准，delta 就等于设备的全部历史累计流量，会把整个累计量当成窗口内产生的而误报；
+	# 旧版本留在历史文件里的这类行也会在这里被忽略
+	base=$(awk -v mac="$mac" -v c="$cutoff" -v col="$col" '$2==mac && $1>=c && $3>0 && (col==3 || ($4>=0 && $5>=0 && ($4+$5)>0)) {print $col; exit}' "$history_file" 2>/dev/null)
+	[ -z "$base" ] && return
+	delta=$((cur - base)); [ "$delta" -lt 0 ] && delta=0
+	echo "$delta"
+}
+
 # 设备异常流量检测
+# 上传、下载各有独立的"阈值 + 时间窗(分钟)"，任意一个方向超标就推送，并只重置超标的那个方向
+# （例如上传 500M/60 分钟、下载 2G/120 分钟）；推送内容里上传和下载都会显示。
+# 没有配置上传/下载阈值时，沿用旧的"总流量 client_usage_max / client_usage_window(小时)"逻辑，已有配置不受影响
 get_client_usage() {
 	[ -z "$client_usage" ] && return
 	[ "$client_usage" -ne "1" ] && return
-	[ -z "$client_usage_max" ] && return
+
+	local up_max down_max total_max
+	up_max=$(parse_bytes "$client_usage_up_max")
+	down_max=$(parse_bytes "$client_usage_down_max")
+	total_max=$(parse_bytes "$client_usage_max")
+	[ -z "$up_max" ] && [ -z "$down_max" ] && [ -z "$total_max" ] && return
+	# 分开配置了任意一个方向，就不再使用旧的总流量阈值，避免两套规则同时触发
+	if [ -n "$up_max" ] || [ -n "$down_max" ]; then total_max=""; fi
+
+	# 窗口单位为分钟；历史只保留 24 小时，快照每 5 分钟一条，所以限制在 5~1440
+	# 兼容迁移：早期版本的 client_usage_up_window / client_usage_down_window 单位是"小时"，
+	# 新选项 *_minutes 为空时把旧值按小时换算，避免把"2 小时"误读成"2 分钟"
+	local up_min="$client_usage_up_minutes" down_min="$client_usage_down_minutes"
+	[ -z "$up_min" ] && [ -n "$client_usage_up_window" ] && up_min=$((client_usage_up_window * 60))
+	[ -z "$down_min" ] && [ -n "$client_usage_down_window" ] && down_min=$((client_usage_down_window * 60))
+	up_min="${up_min:-60}"; down_min="${down_min:-120}"
+	[ "$up_min" -lt 5 ] 2>/dev/null && up_min=5; [ "$up_min" -gt 1440 ] 2>/dev/null && up_min=1440
+	[ "$down_min" -lt 5 ] 2>/dev/null && down_min=5; [ "$down_min" -gt 1440 ] 2>/dev/null && down_min=1440
+	local total_hours="${client_usage_window:-1}"
 
 	[ -z "$get_client_usage_time" ] && get_client_usage_time=$(date +%s)
-	(echo $client_usage_max | sed -r 's/.*(.)$/\1/' | grep -q "K\|k") && client_usage_max=$(expr ${client_usage_max%?} \* 1024)
-	(echo $client_usage_max | sed -r 's/.*(.)$/\1/' | grep -q "M\|m") && client_usage_max=$(expr ${client_usage_max%?} \* 1048576)
-	(echo $client_usage_max | sed -r 's/.*(.)$/\1/' | grep -q "G\|g") && client_usage_max=$(expr ${client_usage_max%?} \* 1073741824)
 	[ -z "$client_usage_disturb" ] && client_usage_disturb="0"
 	[ "$client_usage_disturb" -eq "0" ] && local MACLIST=$(jq -r '.devices[] | select(.status == "online") | .mac' "$devices_json" | sort -u)
 	[ "$client_usage_disturb" -eq "1" ] && [ -n "$client_usage_whitelist" ] && local MACLIST=$(echo "$client_usage_whitelist")
 	[ -z "$MACLIST" ] && return
 
-	# 统计窗口（小时），未配置时默认 1 小时
-	local window_hours="${client_usage_window:-1}"
-	local window_seconds=$((window_hours * 3600))
 	local history_file="${dir}/client_usage_history"
+	local reset_file="${dir}/client_usage_reset"   # 每行: <mac> <方向 up|down|total> <重置时间戳>
 	local now=$(date +%s)
+	local usage_title_set=""
 
-	# 5 分钟才真正记录一次快照并检查一次：checking 太频繁对小时级别的窗口没有意义，
-	# 也能把历史记录文件的体积控制住
+	# 每 5 分钟记录一次快照并检查一次
 	if [ "$((now - get_client_usage_time))" -ge "300" ]; then
 		local mac cur_total cur_in cur_out cur_has_direction
 		for mac in $MACLIST; do
@@ -2415,68 +2548,100 @@ get_client_usage() {
 			[ -z "$cur_in" ] && cur_in=0
 			[ -z "$cur_out" ] && cur_out=0
 
-			# 在历史记录里找"窗口内最早"的一条快照作为对比基准。
-			# 如果这台设备在历史记录里一条都没有落在窗口内（比如刚连接不久，还没攒够
-			# 窗口时长的数据），就跳过本次检测、只记录快照，避免拿设备连接前就已经存在的
-			# 历史累计流量（尤其是 bandix 这类不按连接会话重置计数器的后端）误判成
-			# "刚连接就爆量"
-			local baseline_line=$(awk -v mac="$mac" -v cutoff="$((now - window_seconds))" \
-				'$2==mac && $1>=cutoff {print; exit}' "$history_file" 2>/dev/null)
+			# 统计后端还没有这台设备的数据时会返回全 0（设备刚连上、usage.db 里还没有它）。
+			# 这不是真实的 0 流量：如果把它记成基准，下一次拿到真实累计值时就会被当成
+			# "刚连上就产生了几十 GB"而误报。所以没数据就整台跳过，既不判断也不记录快照
+			if [ "$cur_total" -eq 0 ] && [ "$cur_in" -eq 0 ] && [ "$cur_out" -eq 0 ]; then
+				continue
+			fi
 
-			if [ -n "$baseline_line" ]; then
-				local base_ts base_mac base_total base_in base_out
-				read -r base_ts base_mac base_total base_in base_out <<<"$baseline_line"
-				local delta_total=$((cur_total - base_total))
-				if [ "$delta_total" -ge "0" ] && [ "$delta_total" -ge "$client_usage_max" ]; then
-					local ip=$(jq -r --arg mac "$mac" '.devices[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase) and .status == "online") | .ip' "$devices_json")
-					local ip_name=$(getname ${ip} ${mac})
-					local tmp_usage=$(bytes_for_humans "$delta_total")
-					local time_up=$(jq -r --arg mac "$mac" '.devices[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase) and .status == "online") | .uptime' "$devices_json")
-					local ip_total=$(bytes_for_humans "$cur_total") && [ -n "$ip_total" ] && local ip_total="${str_linefeed}${str_tab} - $(translate "Total Traffic:") ${str_space}${str_space}${str_space}${str_space}${ip_total}"
-					local time1=$(date +%s)
-					local time1=$(time_for_humans $(expr ${time1} - ${time_up}))
+			if { [ -n "$up_max" ] || [ -n "$down_max" ]; } && [ "$cur_has_direction" != "1" ]; then
+				log_change "[WARN] $(translate "Traffic backend provides no upload/download split, per-direction alert skipped")"
+			fi
 
-					if [ -z "$title" ]; then
-						title=$(translate "%s abnormal traffic" "$name")
-						local content_title="${str_splitline}${str_title_start}${font_fail_start}$(translate "Device abnormal traffic")${font_fail_end}${str_title_end}"
-					elif echo "$title" | grep -q "$(translate "abnormal traffic")"; then
-						title="${ip_name} ${title}"
-					else
-						title="$(translate "Device status changed")"
-						local content_title="${str_splitline}${str_title_start}${font_fail_start}$(translate "Device abnormal traffic")${font_fail_end}${str_title_end}"
-					fi
+			local d_up="" d_down="" d_total="" hit_up="" hit_down="" hit_total=""
+			local dir_ok="0"
+			[ "$cur_has_direction" = "1" ] && [ $((cur_in + cur_out)) -gt 0 ] && dir_ok="1"
+			if [ "$dir_ok" = "1" ] && { [ -n "$up_max" ] || [ -n "$down_max" ]; }; then
+				d_up=$(usage_delta "$mac" up $((up_min * 60)) "$cur_out" 5)
+				d_down=$(usage_delta "$mac" down $((down_min * 60)) "$cur_in" 4)
+				[ -n "$up_max" ] && [ -n "$d_up" ] && [ "$d_up" -ge "$up_max" ] && hit_up="1"
+				[ -n "$down_max" ] && [ -n "$d_down" ] && [ "$d_down" -ge "$down_max" ] && hit_down="1"
+			fi
+			if [ -n "$total_max" ]; then
+				d_total=$(usage_delta "$mac" total $((total_hours * 3600)) "$cur_total" 3)
+				[ -n "$d_total" ] && [ "$d_total" -ge "$total_max" ] && hit_total="1"
+			fi
 
-					local detail_upload=""
-					local detail_download=""
-					if [ "$cur_has_direction" = "1" ] && [ -n "$base_in" ] && [ -n "$base_out" ]; then
-						local delta_in=$((cur_in - base_in))
-						local delta_out=$((cur_out - base_out))
-						[ "$delta_in" -lt "0" ] && delta_in="0"
-						[ "$delta_out" -lt "0" ] && delta_out="0"
-						detail_upload="${str_linefeed}${str_tab} - $(translate "Upload Traffic:")${str_space}${str_space}$(bytes_for_humans "$delta_out")"
-						detail_download="${str_linefeed}${str_tab} - $(translate "Download Traffic:")${str_space}$(bytes_for_humans "$delta_in")"
-					fi
+			if [ -n "$hit_up$hit_down$hit_total" ]; then
+				local ip=$(jq -r --arg mac "$mac" '.devices[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase) and .status == "online") | .ip' "$devices_json")
+				local ip_name=$(getname ${ip} ${mac})
+				local time_up=$(jq -r --arg mac "$mac" '.devices[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase) and .status == "online") | .uptime' "$devices_json")
+				local ip_total=$(bytes_for_humans "$cur_total") && [ -n "$ip_total" ] && local ip_total="${str_linefeed}${str_tab} - $(translate "Total Traffic:") ${str_space}${str_space}${str_space}${str_space}${ip_total}"
+				local time1=$(time_for_humans $(expr $(date +%s) - ${time_up}))
 
-					local detail_dbm=""
-					local wxjk_dbm=$(get_signal_dbm "$mac")
-					[ -n "$wxjk_dbm" ] && detail_dbm="${str_linefeed}${str_tab} - $(translate "Signal Strength:")${str_space}${str_space}${wxjk_dbm} dBm"
+				# 标题：(设备) 在 (分钟) 内上传超过 (阈值)；上传下载同时超标时两段并列
+				local dev_title=""
+				[ -n "$hit_up" ] && dev_title="$(translate "within %s min uploaded over %s" "$up_min" "$(bytes_for_humans "$up_max")")"
+				[ -n "$hit_down" ] && dev_title="${dev_title:+${dev_title}, }$(translate "within %s min downloaded over %s" "$down_min" "$(bytes_for_humans "$down_max")")"
+				[ -n "$hit_total" ] && dev_title="$(translate "within %s hour(s) traffic over %s" "$total_hours" "$(bytes_for_humans "$total_max")")"
+				dev_title="${ip_name} ${dev_title}"
 
-					content="\
+				local content_title=""
+				if [ -z "$title" ]; then
+					title="$dev_title"
+					content_title="${str_splitline}${str_title_start}${font_fail_start}$(translate "Device abnormal traffic")${font_fail_end}${str_title_end}"
+				elif [ -n "$usage_title_set" ]; then
+					title="${title}; ${dev_title}"
+					content_title="${str_splitline}${str_title_start}${font_fail_start}$(translate "Device abnormal traffic")${font_fail_end}${str_title_end}"
+				else
+					title="$(translate "Device status changed")"
+					content_title="${str_splitline}${str_title_start}${font_fail_start}$(translate "Device abnormal traffic")${font_fail_end}${str_title_end}"
+				fi
+				usage_title_set="1"
+
+				# 内容：上传、下载都显示（含各自的窗口、增量与阈值）；超标的方向打标记
+				local detail=""
+				if [ "$dir_ok" = "1" ] && { [ -n "$up_max" ] || [ -n "$down_max" ]; }; then
+					local up_txt="${d_up:+$(bytes_for_humans "$d_up")}"; [ -z "$up_txt" ] && up_txt="$(translate "collecting")"
+					local down_txt="${d_down:+$(bytes_for_humans "$d_down")}"; [ -z "$down_txt" ] && down_txt="$(translate "collecting")"
+					[ -n "$up_max" ] && up_txt="${up_txt} / $(bytes_for_humans "$up_max")"
+					[ -n "$down_max" ] && down_txt="${down_txt} / $(bytes_for_humans "$down_max")"
+					[ -n "$hit_up" ] && up_txt="${up_txt} ⚠"
+					[ -n "$hit_down" ] && down_txt="${down_txt} ⚠"
+					detail="${str_linefeed}${str_tab} - $(translate "Upload in %s min:" "$up_min")${str_space}${str_space}${up_txt}"
+					detail="${detail}${str_linefeed}${str_tab} - $(translate "Download in %s min:" "$down_min")${str_space}${str_space}${down_txt}"
+				fi
+				[ -n "$hit_total" ] && detail="${detail}${str_linefeed}${str_tab} - $(translate "Traffic in %s hour(s):" "$total_hours")${str_space}${str_space}$(bytes_for_humans "$d_total")"
+
+				local detail_dbm=""
+				local wxjk_dbm=$(get_signal_dbm "$mac")
+				[ -n "$wxjk_dbm" ] && detail_dbm="${str_linefeed}${str_tab} - $(translate "Signal Strength:")${str_space}${str_space}${wxjk_dbm} dBm"
+
+				content="\
 ${content}\
 ${content_title}\
 ${str_linefeed}${str_tab} - $(translate "Client Name:")${str_space}${str_space}${str_space}${str_space}${str_space}${font_client_start}${ip_name}${font_client_end}\
 ${str_linefeed}${str_tab} - $(translate "Client IP:")${str_space}${str_space}${str_space}${str_space}${ip}\
 ${str_linefeed}${str_tab} - $(translate "Client MAC:")${str_space}${str_space}${str_space}${str_space}${mac}${ip_total}\
-${str_linefeed}${str_tab} - $(translate "Traffic in %s hour(s):" "$window_hours")${str_space}${str_space}${str_space}${tmp_usage}${detail_upload}${detail_download}\
+${detail}\
 ${str_linefeed}${str_tab} - $(translate "Uptime:")${str_space}${str_space}${str_space}${str_space}${time1}${detail_dbm}"
-				fi
+
+				# 重置：只重置触发的方向，另一个方向的统计继续累计
+				[ -n "$hit_up" ] && echo "$mac up $now" >>"$reset_file"
+				[ -n "$hit_down" ] && echo "$mac down $now" >>"$reset_file"
+				[ -n "$hit_total" ] && echo "$mac total $now" >>"$reset_file"
 			fi
 
+			# 后端没给方向数据，或总流量>0 却读到上下行全 0 时，方向列记为 -1，不当作有效基准
+			if [ "$cur_has_direction" != "1" ] || { [ "$cur_total" -gt 0 ] && [ $((cur_in + cur_out)) -eq 0 ]; }; then
+				cur_in=-1; cur_out=-1
+			fi
 			echo "$now $mac $cur_total $cur_in $cur_out" >>"$history_file"
 		done
 
-		# 清理超过 24 小时（当前支持的最大窗口）的历史记录，控制文件体积
 		[ -f "$history_file" ] && awk -v cutoff="$((now - 86400))" '$1>=cutoff' "$history_file" >"${history_file}.tmp" 2>/dev/null && mv "${history_file}.tmp" "$history_file"
+		[ -f "$reset_file" ] && awk '{k=$1" "$2; t[k]=$3} END{for(k in t) print k, t[k]}' "$reset_file" >"${reset_file}.tmp" 2>/dev/null && mv "${reset_file}.tmp" "$reset_file"
 		get_client_usage_time=$now
 	fi
 }
@@ -2652,8 +2817,9 @@ set_ip_black() {
 
 # 监听登录事件（封装为函数，拒绝调试模式下日志刷屏）
 monitor_logins() {
-	if [ -n "$web_logged" ] || [ -n "$ssh_logged" ] || [ -n "$web_login_failed" ] || [ -n "$ssh_login_failed" ]; then
+	if [ -n "$web_logged" ] || [ -n "$ssh_logged" ] || [ -n "$web_login_failed" ] || [ -n "$ssh_login_failed" ] || [ -n "$wifi_connected" ] || [ -n "$wifi_auth_failed" ]; then
 		# 声明关联数组
+		declare -A wifi_failed_counts wifi_last_fail wifi_last_conn
 		declare -A web_login_counts
 		declare -A ssh_login_counts
 		declare -A web_failed_counts
@@ -2701,6 +2867,23 @@ monitor_logins() {
 					# 如果成功提取到 IP 地址，调用 process_login 处理
 					[ -n "$ssh_failed_ip" ] && process_login "$ssh_failed_ip" $(echo "$line" | awk '{print $4}') ssh_failed_counts
 				}
+
+				# WiFi 事件（hostapd 日志）：连接成功 / 认证失败（密码错误等）
+				# 连接成功也要识别——即使没开连接推送，也需要用它清零该设备的失败计数
+				if [ -n "$wifi_connected" ] || [ -n "$wifi_auth_failed" ]; then
+					case "$line" in
+					*AP-STA-CONNECTED*)
+						wifi_evt_mac=$(echo "$line" | grep -ioE "([0-9a-f]{2}:){5}[0-9a-f]{2}" | head -n1)
+						[ -n "$wifi_evt_mac" ] && process_wifi "$wifi_evt_mac" "$(echo "$line" | awk '{print $4}')" wifi_conn
+						;;
+					*PSK-MISMATCH*|*"deauthenticated due to local auth failure"*|*"verify confirm fail"*|*"EAPOL-Key MIC invalid"*)
+						[ -n "$wifi_auth_failed" ] && {
+							wifi_evt_mac=$(echo "$line" | grep -ioE "([0-9a-f]{2}:){5}[0-9a-f]{2}" | head -n1)
+							[ -n "$wifi_evt_mac" ] && process_wifi "$wifi_evt_mac" "$(echo "$line" | awk '{print $4}')" wifi_fail
+						}
+						;;
+					esac
+				fi
 
 			done
 		) &
@@ -2804,6 +2987,238 @@ fail2ban_send() {
 	[ -n "$device_name" ] && f2b_title="【$device_name】$f2b_title"
 	(echo "$lite_enable" | grep -q "content") && f2b_content="$f2b_title"
 	[ "$disturb_RETVAL" -eq 0 ] && diy_send "${f2b_title}" "${f2b_content}" "${jsonpath}" >/dev/null 2>&1
+}
+
+# 处理 WiFi 事件
+# 参数: $1 MAC  $2 日志时间  $3 事件类型 wifi_conn | wifi_fail
+# 失败次数按 MAC 计数，每条失败日志都记一次（注意：一次错误密码连接可能打出多行日志），
+# 成功连接后清零。累计达到 wifi_max_num 时，若开启了 wifi_auto_ban 则踢出并封禁该 MAC（与 Web/SSH 的自动封禁开关互相独立）
+process_wifi() {
+	local mac=$(echo "$1" | tr 'A-Z' 'a-z')
+	local wtime="$2" kind="$3"
+	local now=$(date +%s)
+	local prev=${wifi_last_fail["$mac"]:-0}
+
+	if [ "$kind" = "wifi_conn" ]; then
+		# 不同版本的 hostapd 在握手失败时也可能先打出 AP-STA-CONNECTED，
+		# 所以只有在最近 30 秒内没出现过该设备的失败记录时，才把连接当作"真的连上了"并清零计数
+		[ $((now - prev)) -gt 30 ] && unset wifi_failed_counts["$mac"]
+		[ -z "$wifi_connected" ] && return
+		# 同一设备 60 秒内重复的关联/漫游不重复推送
+		[ $((now - ${wifi_last_conn["$mac"]:-0})) -lt 60 ] && return
+		wifi_last_conn["$mac"]=$now
+		wifi_send "$mac" "$wtime" "connected"
+		return
+	fi
+
+	# 每条失败日志都记一次（不再合并）；距上次失败超过 10 分钟则从头计数
+	[ $((now - prev)) -gt 600 ] && unset wifi_failed_counts["$mac"]
+	wifi_last_fail["$mac"]=$now
+	wifi_failed_counts["$mac"]=$((${wifi_failed_counts["$mac"]:-0} + 1))
+	local count=${wifi_failed_counts["$mac"]} banned=""
+	log_change "[DEBUG] $(translate "WiFi auth failure: %s (%s/%s)" "$mac" "$count" "${wifi_max_num:-3}")"
+	if [ "$count" -ge "${wifi_max_num:-3}" ] && [ "$wifi_auto_ban" = "1" ]; then
+		wifi_ban_mac "$mac"
+		case $? in
+			0) banned="1" ;;      # 已封禁（已确认）
+			2) banned="" ;;       # 白名单设备，不封禁（仍然推送这次失败）
+			*) banned="failed" ;; # 想封禁但没能确认成功
+		esac
+		unset wifi_failed_counts["$mac"]
+	fi
+	wifi_send "$mac" "$wtime" "auth_failed" "$count" "$banned"
+	[ "${#wifi_failed_counts[@]}" -gt "100" ] && wifi_failed_counts=()
+}
+
+# 列出所有 hostapd 无线接口（phy0-ap0 之类）
+wifi_ifaces() {
+	local l
+	l=$(ubus list 'hostapd.*' 2>/dev/null | sed 's/^hostapd\.//')
+	[ -z "$l" ] && l=$(ls /var/run/hostapd 2>/dev/null | grep -v '^global$')
+	echo "$l"
+}
+
+# 封禁结果汇总，供推送显示："本机无线 ✓, 防火墙 ✓, 192.168.1.2 ✓"
+wifi_ban_report_add() {
+	wifi_ban_report="${wifi_ban_report:+${wifi_ban_report}, }$1 $2"
+}
+
+# 网络层封禁：在主路由防火墙里按源 MAC 丢包。
+# 用独立的 nft 表（不受 fw4 重载影响），集合自带超时，到期自动解除。
+# 对任意品牌、桥接模式的 AP 都有效：被封设备哪怕连上了别的 AP，流量到主路由时源 MAC 仍是它自己，会被丢弃，拿不到 IP、上不了网。
+# 注意：副路由是路由模式（自带子网）时，主路由看到的源 MAC 是副路由，此方法无效。
+# 返回值: 0=已封禁并确认  1=失败  3=已关闭
+wifi_ban_firewall() {
+	local mac="$1" secs="$2"
+	[ "$wifi_ban_net" = "0" ] && return 3
+	if ! command -v nft >/dev/null 2>&1; then
+		log_change "[WARN] $(translate "Firewall-level WiFi ban needs nftables (firewall4), skipped")"
+		return 1
+	fi
+	nft list table inet wechatpush_wifi >/dev/null 2>&1 || printf '%s\n' \
+		'table inet wechatpush_wifi {' \
+		'	set mac_black { type ether_addr; flags timeout; }' \
+		'	chain prerouting { type filter hook prerouting priority -310; policy accept; ether saddr @mac_black counter drop comment "wechatpush wifi ban"; }' \
+		'}' | nft -f - >/dev/null 2>&1
+	nft delete element inet wechatpush_wifi mac_black "{ $mac }" >/dev/null 2>&1
+	nft add element inet wechatpush_wifi mac_black "{ $mac timeout ${secs}s }" >/dev/null 2>&1
+	nft list set inet wechatpush_wifi mac_black 2>/dev/null | grep -qi "$mac"
+}
+
+# 把封禁同步到其他 OpenWrt（副路由/AP）。
+# 复用"从其他 OpenWrt 获取信息"里填写的 OpenWrt 列表(op_host_ips，每项可写 ip:端口)和已有的 SSH 密钥，
+# 在对方的 hostapd 上同样执行 ubus 封禁，并用 list_bans 确认。对方封禁自带到期时间。
+# 前提：已启用"从其他 OpenWrt 获取信息"，且没有关闭 wifi_ban_sync
+wifi_ban_sync_remote() {
+	local mac="$1" secs="$2" entry host port res ms=$(( $2 * 1000 ))
+	[ -z "$openwrt_info_enable" ] && return
+	[ "$wifi_ban_sync" = "0" ] && return
+	[ -z "$op_host_ips" ] && return
+	local remote_cmd="aps=\$(ubus list 'hostapd.*' 2>/dev/null); [ -z \"\$aps\" ] && { echo NOAP; exit 0; }; for o in \$aps; do ubus call \"\$o\" del_client '{\"addr\":\"$mac\",\"reason\":5,\"deauth\":true,\"ban_time\":$ms}' >/dev/null 2>&1; done; for o in \$aps; do ubus call \"\$o\" list_bans 2>/dev/null | grep -qi '$mac' && { echo BANNED; break; }; done"
+	for entry in $op_host_ips; do
+		read -r host port <<<"$(op_ssh_target "$entry")"
+		res=$(run_with_tag ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o BatchMode=yes -p "$port" -i /root/.ssh/id_rsa root@"$host" "$remote_cmd" 2>/dev/null)
+		if echo "$res" | grep -q BANNED; then
+			wifi_ban_report_add "$host" "✓"; wifi_ban_any_ok="1"
+			log_change "[INFO] $(translate "WiFi ban of %s synced to OpenWrt %s" "$mac" "$host")"
+		elif echo "$res" | grep -q NOAP; then
+			log_change "[INFO] $(translate "OpenWrt %s has no hostapd, ban sync skipped" "$host")"
+		else
+			wifi_ban_report_add "$host" "✗"
+			log_change "[WARN] $(translate "WiFi ban of %s could not be synced to OpenWrt %s (SSH failed or ban not confirmed)" "$mac" "$host")"
+		fi
+	done
+}
+
+# 封禁一个 WiFi 设备（按 MAC）。三层，互相独立，任意一层确认生效即视为已封禁：
+#   1. 本机无线：hostapd_cli deny_acl（可用时）和 ubus ban_time，并用 deny_acl SHOW / list_bans 确认
+#   2. 主路由防火墙：按源 MAC 丢包（对任意 AP 生效，见 wifi_ban_firewall）
+#   3. 其他 OpenWrt：SSH 同步（见 wifi_ban_sync_remote）
+# 返回值: 0=至少一层确认生效  1=都没能确认  2=在白名单里，不封禁
+# 封禁时长用独立的 wifi_ban_timeout（分钟）；本机无线封禁在 hostapd/路由器重启后失效
+wifi_ban_mac() {
+	local mac="$1" ifc ok="" acl_ifaces="" now=$(date +%s)
+	local ban_file="${dir}/wifi_bans"
+	wifi_ban_report=""; wifi_ban_any_ok=""
+	# 白名单里的设备永远不封（MAC 不区分大小写）
+	local wl
+	for wl in $wifi_ban_whitelist; do
+		if [ "$(echo "$wl" | tr 'A-Z' 'a-z')" = "$mac" ]; then
+			log_change "[INFO] $(translate "WiFi device %s is in the ban whitelist, not banned" "$mac")"
+			return 2
+		fi
+	done
+	local mins=${wifi_ban_timeout:-60}
+	{ [ "$mins" -le 0 ] || [ "$mins" -gt 71582 ]; } 2>/dev/null && mins=71582
+	local secs=$((mins * 60))
+
+	# 1. 本机无线
+	for ifc in $(wifi_ifaces); do
+		if command -v hostapd_cli >/dev/null 2>&1; then
+			hostapd_cli -i "$ifc" deny_acl ADD_MAC "$mac" >/dev/null 2>&1
+			if hostapd_cli -i "$ifc" deny_acl SHOW 2>/dev/null | grep -qi "$mac"; then
+				ok="${ok} ${ifc}:acl"; acl_ifaces="${acl_ifaces} ${ifc}"
+			fi
+		fi
+		ubus call "hostapd.${ifc}" del_client "{\"addr\":\"$mac\",\"reason\":5,\"deauth\":true,\"ban_time\":$((secs * 1000))}" >/dev/null 2>&1
+		ubus call "hostapd.${ifc}" list_bans 2>/dev/null | grep -qi "$mac" && ok="${ok} ${ifc}:ubus"
+	done
+	if [ -n "$ok" ]; then
+		wifi_ban_report_add "$(translate "Local WiFi")" "✓"; wifi_ban_any_ok="1"
+		# 只有 ACL 方式需要我们自己到期解封（ubus 的封禁自带到期时间）
+		if [ -n "$acl_ifaces" ]; then
+			[ -f "$ban_file" ] && sed -i "/^$mac /d" "$ban_file"
+			echo "$mac $((now + secs)) ${acl_ifaces# }" >>"$ban_file"
+		fi
+		log_change "[INFO] $(translate "WiFi device %s banned for %s minutes (%s)" "$mac" "$mins" "${ok# }")"
+	else
+		wifi_ban_report_add "$(translate "Local WiFi")" "✗"
+		log_change "[WARN] $(translate "WiFi ban of %s could not be confirmed (hostapd_cli missing or hostapd rejected it)" "$mac")"
+	fi
+
+	# 2. 主路由防火墙
+	wifi_ban_firewall "$mac" "$secs"
+	case $? in
+		0) wifi_ban_report_add "$(translate "Firewall")" "✓"; wifi_ban_any_ok="1"
+		   log_change "[INFO] $(translate "WiFi device %s blocked in firewall for %s minutes" "$mac" "$mins")" ;;
+		3) ;;
+		*) wifi_ban_report_add "$(translate "Firewall")" "✗" ;;
+	esac
+
+	# 3. 其他 OpenWrt
+	wifi_ban_sync_remote "$mac" "$secs"
+
+	[ -n "$wifi_ban_any_ok" ] && return 0
+	return 1
+}
+
+# 到期解封（主循环每轮调用）：移除 hostapd deny_acl 里到期的 MAC
+wifi_unban_expired() {
+	local ban_file="${dir}/wifi_bans"
+	[ -f "$ban_file" ] || return
+	local now=$(date +%s) mac exp ifs ifc keep=""
+	while read -r mac exp ifs; do
+		[ -z "$mac" ] && continue
+		if [ "$exp" -le "$now" ] 2>/dev/null; then
+			for ifc in $ifs; do hostapd_cli -i "$ifc" deny_acl DEL_MAC "$mac" >/dev/null 2>&1; done
+			log_change "[INFO] $(translate "WiFi ban expired, device %s unbanned" "$mac")"
+		else
+			keep="${keep}${mac} ${exp} ${ifs}"$'\n'
+		fi
+	done <"$ban_file"
+	printf '%s' "$keep" >"$ban_file"
+}
+
+# WiFi 连接 / 认证失败推送（实时）
+# 参数: $1 MAC  $2 日志时间  $3 connected | auth_failed  $4 当前失败次数  $5 是否已拉黑
+wifi_send() {
+	local mac="$1" wtime="$2" event="$3" count="$4" banned="$5"
+	>"${dir}/send_enable.lock"
+
+	# 连接推送遵循"登录勿扰"=仅记录日志
+	[ "$event" = "connected" ] && [ -n "$login_disturb" ] && [ "$login_disturb" -eq 1 ] && {
+		log_change "[INFO] $(translate "WiFi device %s connected" "$mac")"
+		return
+	}
+
+	local dname="" dip=""
+	if [ -f "$devices_json" ]; then
+		dname=$(jq -r --arg mac "$mac" '.devices[] | select((.mac | ascii_downcase) == $mac) | .name' "$devices_json" 2>/dev/null | head -n1)
+		dip=$(jq -r --arg mac "$mac" '.devices[] | select((.mac | ascii_downcase) == $mac) | .ip' "$devices_json" 2>/dev/null | head -n1)
+	fi
+	local label="${dname:-$mac}"
+
+	local w_title w_info
+	if [ "$event" = "connected" ]; then
+		w_title=$(translate "WiFi device %s connected" "$label")
+		w_info="${str_splitline}${str_title_start}${font_success_start}$(translate "WiFi Connection")${font_success_end}${str_title_end}"
+		log_change "${disturb_text} $w_title"
+	elif [ "$banned" = "failed" ]; then
+		w_title=$(translate "WiFi device %s frequent auth failures, ban could not be confirmed" "$label")
+		w_info="${str_splitline}${str_title_start}${font_fail_start}$(translate "Frequent WiFi Auth Failures")${font_fail_end}${str_title_end}"
+		log_change "${disturb_text} $w_title"
+	elif [ "$banned" = "1" ]; then
+		w_title=$(translate "WiFi device %s frequent auth failures, blocked" "$label")
+		w_info="${str_splitline}${str_title_start}${font_fail_start}$(translate "Frequent WiFi Auth Failures")${font_fail_end}${str_title_end}"
+		log_change "${disturb_text} $w_title"
+	else
+		w_title=$(translate "WiFi device %s auth failed (%s/%s)" "$label" "$count" "${wifi_max_num:-3}")
+		w_info="${str_splitline}${str_title_start}${font_fail_start}$(translate "WiFi Auth Failed")${font_fail_end}${str_title_end}"
+		log_change "${disturb_text} $w_title"
+	fi
+
+	local w_content="${w_info}"
+	w_content="${w_content}${str_linefeed}${str_tab} - $(translate "Time:")${str_space}${str_space}${str_space}${str_space}${wtime}"
+	w_content="${w_content}${str_linefeed}${str_tab} - $(translate "Client MAC:")${str_space}${str_space}${mac}"
+	[ -n "$dname" ] && w_content="${w_content}${str_linefeed}${str_tab} - $(translate "Client Name:")${str_space}${str_space}${dname}"
+	[ -n "$dip" ] && w_content="${w_content}${str_linefeed}${str_tab} - $(translate "Client IP:")${str_space}${str_space}${dip}"
+	[ -n "$banned" ] && [ -n "$wifi_ban_report" ] && w_content="${w_content}${str_linefeed}${str_tab} - $(translate "Ban methods:")${str_space}${str_space}${wifi_ban_report}"
+
+	disturb
+	local disturb_RETVAL=$?
+	[ -n "$device_name" ] && w_title="【$device_name】$w_title"
+	(echo "$lite_enable" | grep -q "content") && w_content="$w_title"
+	[ "$disturb_RETVAL" -eq 0 ] && diy_send "${w_title}" "${w_content}" "${jsonpath}" >/dev/null 2>&1
 }
 
 # 处理登录事件
