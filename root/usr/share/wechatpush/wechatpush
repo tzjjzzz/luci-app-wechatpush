@@ -47,7 +47,7 @@ read_config() {
 		"jsonpath" "sckey" "sc3key" "sc3uid" "sc3tags" "corpid" "userid" "agentid" "corpsecret" "mediapath" "wxpusher_apptoken" "wxpusher_uids" "wxpusher_topicIds" "pushplus_token" "tg_api_server" "tg_token" "tg_chat_id" "tg_thread_id" "recipient_email" "smtp_host" "smtp_port" "smtp_tls" "smtp_starttls" "smtp_user" "smtp_passwordeval" "smtp_from" "smtp_from_full_name" \
 		"get_ipv4_mode" "ipv4_interface" "get_ipv6_mode" "ipv6_interface" \
 		"device_notification" "cpu_notification" "cpu_load_threshold" "temperature_threshold" \
-		"client_usage" "client_usage_max" "client_usage_window" "client_usage_up_max" "client_usage_up_window" "client_usage_down_max" "client_usage_down_window" "client_usage_disturb" "client_usage_whitelist" \
+		"client_usage" "client_usage_max" "client_usage_window" "client_usage_up_max" "client_usage_up_window" "client_usage_up_minutes" "client_usage_down_max" "client_usage_down_window" "client_usage_down_minutes" "client_usage_disturb" "client_usage_whitelist" \
 		"login_notification" "wifi_auto_ban" "wifi_max_num" "wifi_ban_timeout" "login_max_num" "login_web_black" "login_ip_black_timeout" "login_ip_white_list" "port_knocking_enable" "login_ip_white_timeout" "login_port_white" "login_port_forward_list" \
 		"crontab_regular_time" "crontab_interval_time" \
 		"do_not_disturb_mode" "do_not_disturb_starttime" "do_not_disturb_endtime" "up_down_push_whitelist" "up_down_push_blacklist" "up_down_push_interface" "mac_online_list" "mac_offline_list" "cpu_threshold_duration" "cpu_notification_delay" "login_disturb" "login_notification_delay" "login_log_enable" \
@@ -426,6 +426,9 @@ main() {
 
 		# 硬盘检测
 		#[ ! -f "${dir}/send_enable.lock" ] && get_disk
+
+		# WiFi 封禁到期解封
+		wifi_unban_expired
 
 		# 异常流量检测
 		[ ! -f "${dir}/send_enable.lock" ] && get_client_usage
@@ -2511,7 +2514,12 @@ get_client_usage() {
 	if [ -n "$up_max" ] || [ -n "$down_max" ]; then total_max=""; fi
 
 	# 窗口单位为分钟；历史只保留 24 小时，快照每 5 分钟一条，所以限制在 5~1440
-	local up_min="${client_usage_up_window:-60}" down_min="${client_usage_down_window:-120}"
+	# 兼容迁移：早期版本的 client_usage_up_window / client_usage_down_window 单位是"小时"，
+	# 新选项 *_minutes 为空时把旧值按小时换算，避免把"2 小时"误读成"2 分钟"
+	local up_min="$client_usage_up_minutes" down_min="$client_usage_down_minutes"
+	[ -z "$up_min" ] && [ -n "$client_usage_up_window" ] && up_min=$((client_usage_up_window * 60))
+	[ -z "$down_min" ] && [ -n "$client_usage_down_window" ] && down_min=$((client_usage_down_window * 60))
+	up_min="${up_min:-60}"; down_min="${down_min:-120}"
 	[ "$up_min" -lt 5 ] 2>/dev/null && up_min=5; [ "$up_min" -gt 1440 ] 2>/dev/null && up_min=1440
 	[ "$down_min" -lt 5 ] 2>/dev/null && down_min=5; [ "$down_min" -gt 1440 ] 2>/dev/null && down_min=1440
 	local total_hours="${client_usage_window:-1}"
@@ -2535,6 +2543,13 @@ get_client_usage() {
 			[ -z "$cur_total" ] && cur_total=0
 			[ -z "$cur_in" ] && cur_in=0
 			[ -z "$cur_out" ] && cur_out=0
+
+			# 统计后端还没有这台设备的数据时会返回全 0（设备刚连上、usage.db 里还没有它）。
+			# 这不是真实的 0 流量：如果把它记成基准，下一次拿到真实累计值时就会被当成
+			# "刚连上就产生了几十 GB"而误报。所以没数据就整台跳过，既不判断也不记录快照
+			if [ "$cur_total" -eq 0 ] && [ "$cur_in" -eq 0 ] && [ "$cur_out" -eq 0 ]; then
+				continue
+			fi
 
 			if { [ -n "$up_max" ] || [ -n "$down_max" ]; } && [ "$cur_has_direction" != "1" ]; then
 				log_change "[WARN] $(translate "Traffic backend provides no upload/download split, per-direction alert skipped")"
@@ -2972,9 +2987,12 @@ process_wifi() {
 	local mac=$(echo "$1" | tr 'A-Z' 'a-z')
 	local wtime="$2" kind="$3"
 	local now=$(date +%s)
+	local prev=${wifi_last_fail["$mac"]:-0}
 
 	if [ "$kind" = "wifi_conn" ]; then
-		unset wifi_failed_counts["$mac"]
+		# 不同版本的 hostapd 在握手失败时也可能先打出 AP-STA-CONNECTED，
+		# 所以只有在最近 30 秒内没出现过该设备的失败记录时，才把连接当作"真的连上了"并清零计数
+		[ $((now - prev)) -gt 30 ] && unset wifi_failed_counts["$mac"]
 		[ -z "$wifi_connected" ] && return
 		# 同一设备 60 秒内重复的关联/漫游不重复推送
 		[ $((now - ${wifi_last_conn["$mac"]:-0})) -lt 60 ] && return
@@ -2983,38 +3001,89 @@ process_wifi() {
 		return
 	fi
 
-	[ $((now - ${wifi_last_fail["$mac"]:-0})) -lt 10 ] && return
+	# 10 秒内的重复日志只算一次；距上次失败超过 10 分钟则从头计数
+	[ $((now - prev)) -lt 10 ] && return
+	[ $((now - prev)) -gt 600 ] && unset wifi_failed_counts["$mac"]
 	wifi_last_fail["$mac"]=$now
 	wifi_failed_counts["$mac"]=$((${wifi_failed_counts["$mac"]:-0} + 1))
 	local count=${wifi_failed_counts["$mac"]} banned=""
+	log_change "[DEBUG] $(translate "WiFi auth failure: %s (%s/%s)" "$mac" "$count" "${wifi_max_num:-3}")"
 	if [ "$count" -ge "${wifi_max_num:-3}" ] && [ "$wifi_auto_ban" = "1" ]; then
-		wifi_ban_mac "$mac" && {
-			unset wifi_failed_counts["$mac"]
-			banned="1"
-		}
+		wifi_ban_mac "$mac"
+		case $? in
+			0) banned="1" ;;      # 已封禁（已确认）
+			2) banned="" ;;       # 设备当前在线，按设计不封禁
+			*) banned="failed" ;; # 想封禁但没能确认成功
+		esac
+		unset wifi_failed_counts["$mac"]
 	fi
 	wifi_send "$mac" "$wtime" "auth_failed" "$count" "$banned"
 	[ "${#wifi_failed_counts[@]}" -gt "100" ] && wifi_failed_counts=()
 }
 
-# 通过 hostapd 的 ubus 接口踢出并临时封禁一个 MAC（不改动无线配置，重启 hostapd/路由器后自动失效）
-# 封禁时长用独立的 wifi_ban_timeout（分钟）；hostapd 的 ban_time 是毫秒的 32 位整数，最长约 49 天
-# 当前已在线（已连接）的设备不会被封，避免误伤
+# 列出所有 hostapd 无线接口（phy0-ap0 之类）
+wifi_ifaces() {
+	local l
+	l=$(ubus list 'hostapd.*' 2>/dev/null | sed 's/^hostapd\.//')
+	[ -z "$l" ] && l=$(ls /var/run/hostapd 2>/dev/null | grep -v '^global$')
+	echo "$l"
+}
+
+# 封禁一个 WiFi 设备（按 MAC），只有"确认生效"才返回 0：
+#   方式一 hostapd_cli deny_acl（运行时拒绝列表，随后用 deny_acl SHOW 确认）
+#   方式二 ubus hostapd.<接口> del_client 带 ban_time（随后用 list_bans 确认）
+# 返回值: 0=已封禁并确认  1=尝试了但无法确认  2=设备当前在线，不封禁
+# 封禁时长用独立的 wifi_ban_timeout（分钟）；重启 hostapd/路由器后失效
 wifi_ban_mac() {
-	local mac="$1"
-	command -v ubus >/dev/null 2>&1 || return 1
+	local mac="$1" ifc ok="" acl_ifaces="" now=$(date +%s)
+	local ban_file="${dir}/wifi_bans"
 	if [ -f "$devices_json" ] && [ -n "$(jq -r --arg mac "$mac" '.devices[] | select((.mac | ascii_downcase) == $mac and .status == "online") | .mac' "$devices_json" 2>/dev/null | head -n1)" ]; then
 		log_change "[INFO] $(translate "WiFi device %s is currently online, not banned" "$mac")"
+		return 2
+	fi
+	local mins=${wifi_ban_timeout:-60}
+	{ [ "$mins" -le 0 ] || [ "$mins" -gt 71582 ]; } 2>/dev/null && mins=71582
+	local secs=$((mins * 60))
+
+	for ifc in $(wifi_ifaces); do
+		if command -v hostapd_cli >/dev/null 2>&1; then
+			hostapd_cli -i "$ifc" deny_acl ADD_MAC "$mac" >/dev/null 2>&1
+			if hostapd_cli -i "$ifc" deny_acl SHOW 2>/dev/null | grep -qi "$mac"; then
+				ok="${ok} ${ifc}:acl"; acl_ifaces="${acl_ifaces} ${ifc}"
+			fi
+		fi
+		ubus call "hostapd.${ifc}" del_client "{\"addr\":\"$mac\",\"reason\":5,\"deauth\":true,\"ban_time\":$((secs * 1000))}" >/dev/null 2>&1
+		ubus call "hostapd.${ifc}" list_bans 2>/dev/null | grep -qi "$mac" && ok="${ok} ${ifc}:ubus"
+	done
+
+	if [ -z "$ok" ]; then
+		log_change "[WARN] $(translate "WiFi ban of %s could not be confirmed (hostapd_cli missing or hostapd rejected it)" "$mac")"
 		return 1
 	fi
-	# WiFi 封禁时长独立设置（分钟），与 Web/SSH 的 IP 拉黑时间无关；默认 60 分钟，hostapd 上限约 49 天
-	local secs=$(( ${wifi_ban_timeout:-60} * 60 ))
-	{ [ "$secs" -le 0 ] || [ "$secs" -gt 4294967 ]; } && secs=4294967
-	local obj ok=1
-	for obj in $(ubus list 'hostapd.*' 2>/dev/null); do
-		ubus call "$obj" del_client "{\"addr\":\"$mac\",\"reason\":5,\"deauth\":true,\"ban_time\":$((secs * 1000))}" >/dev/null 2>&1 && ok=0
-	done
-	return $ok
+	# 只有 ACL 方式需要我们自己到期解封（ubus 的封禁自带到期时间）
+	if [ -n "$acl_ifaces" ]; then
+		[ -f "$ban_file" ] && sed -i "/^$mac /d" "$ban_file"
+		echo "$mac $((now + secs)) ${acl_ifaces# }" >>"$ban_file"
+	fi
+	log_change "[INFO] $(translate "WiFi device %s banned for %s minutes (%s)" "$mac" "$mins" "${ok# }")"
+	return 0
+}
+
+# 到期解封（主循环每轮调用）：移除 hostapd deny_acl 里到期的 MAC
+wifi_unban_expired() {
+	local ban_file="${dir}/wifi_bans"
+	[ -f "$ban_file" ] || return
+	local now=$(date +%s) mac exp ifs ifc keep=""
+	while read -r mac exp ifs; do
+		[ -z "$mac" ] && continue
+		if [ "$exp" -le "$now" ] 2>/dev/null; then
+			for ifc in $ifs; do hostapd_cli -i "$ifc" deny_acl DEL_MAC "$mac" >/dev/null 2>&1; done
+			log_change "[INFO] $(translate "WiFi ban expired, device %s unbanned" "$mac")"
+		else
+			keep="${keep}${mac} ${exp} ${ifs}"$'\n'
+		fi
+	done <"$ban_file"
+	printf '%s' "$keep" >"$ban_file"
 }
 
 # WiFi 连接 / 认证失败推送（实时）
@@ -3040,6 +3109,10 @@ wifi_send() {
 	if [ "$event" = "connected" ]; then
 		w_title=$(translate "WiFi device %s connected" "$label")
 		w_info="${str_splitline}${str_title_start}${font_success_start}$(translate "WiFi Connection")${font_success_end}${str_title_end}"
+		log_change "${disturb_text} $w_title"
+	elif [ "$banned" = "failed" ]; then
+		w_title=$(translate "WiFi device %s frequent auth failures, ban could not be confirmed" "$label")
+		w_info="${str_splitline}${str_title_start}${font_fail_start}$(translate "Frequent WiFi Auth Failures")${font_fail_end}${str_title_end}"
 		log_change "${disturb_text} $w_title"
 	elif [ "$banned" = "1" ]; then
 		w_title=$(translate "WiFi device %s frequent auth failures, blocked" "$label")

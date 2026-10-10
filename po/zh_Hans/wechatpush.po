@@ -1905,8 +1905,6 @@ msgstr "WiFi 认证失败次数"
 msgid "WiFi ban time (minutes)"
 msgstr "WiFi 封禁时长（分钟）"
 
-msgid "Independent of the \"Auto-ban illegal login devices\" switch above. A device (by MAC) is kicked and banned via hostapd; the ban is not persistent across hostapd/router restarts, and devices currently online are never banned."
-msgstr "与上面的“自动封禁非法登录设备”开关互相独立。设备（按 MAC）会被踢出并通过 hostapd 封禁；封禁在 hostapd/路由器重启后失效，当前在线的设备不会被封禁。"
 
 msgid "Failures of the same device within a row (cleared by a successful connection); repeated log lines within 10 seconds count once."
 msgstr "同一设备连续认证失败的次数（成功连接后清零）；10 秒内重复的日志只算一次。"
@@ -1925,3 +1923,21 @@ msgstr "排除的 WireGuard 接口"
 
 msgid "All WireGuard interfaces are detected automatically (wg show interfaces). List interfaces here only if you do not want push notifications for them, e.g. a tunnel where this router is the client. Requires wireguard-tools (the \"wg\" command) to be installed."
 msgstr "所有 WireGuard 接口会自动发现（wg show interfaces）。只有不想收到推送的接口才需要填在这里，例如本机作为客户端去连接 VPS 的隧道。需要安装 wireguard-tools（wg 命令）。"
+
+msgid "Independent of the \"Auto-ban illegal login devices\" switch above. A device (by MAC) is kicked and banned via hostapd (deny list / ubus); \"banned\" is only reported after the ban is confirmed. The ban is lost when hostapd or the router restarts, and devices currently online are never banned."
+msgstr "与上面的“自动封禁非法登录设备”开关互相独立。设备（按 MAC）会被踢出并通过 hostapd（拒绝列表 / ubus）封禁；只有确认封禁生效后才会推送“已封禁”。hostapd 或路由器重启后封禁失效，当前在线的设备不会被封禁。"
+
+msgid "WiFi auth failure: %s (%s/%s)"
+msgstr "WiFi 认证失败：%s（%s/%s）"
+
+msgid "WiFi ban of %s could not be confirmed (hostapd_cli missing or hostapd rejected it)"
+msgstr "无法确认已封禁 %s（缺少 hostapd_cli，或 hostapd 拒绝了封禁）"
+
+msgid "WiFi device %s banned for %s minutes (%s)"
+msgstr "WiFi 设备 %s 已封禁 %s 分钟（%s）"
+
+msgid "WiFi ban expired, device %s unbanned"
+msgstr "WiFi 封禁已到期，设备 %s 已解封"
+
+msgid "WiFi device %s frequent auth failures, ban could not be confirmed"
+msgstr "WiFi 设备 %s 频繁认证失败，但封禁未能确认生效"

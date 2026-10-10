@@ -546,23 +546,36 @@ return view.extend({
 		o.depends('client_usage', '1');
 		o.description = _('Upload and download are checked independently; whichever exceeds its own limit within its own time window triggers a push, and only that direction is reset afterwards. Append K, M or G. Needs a traffic backend that reports upload/download separately.');
 
-		o = s.taboption('content', form.Value, 'client_usage_up_window', _('Upload time window (minutes)'));
+		o = s.taboption('content', form.Value, 'client_usage_up_minutes', _('Upload time window (minutes)'));
 		o.placeholder = '60';
 		o.default = '60';
 		o.datatype = 'range(5,1440)';
 		o.depends('client_usage', '1');
+		o.cfgvalue = function (section_id) {
+			// 兼容早期版本以"小时"保存的 client_usage_up_window
+			var v = uci.get('wechatpush', section_id, 'client_usage_up_minutes');
+			if (v) return v;
+			var h = parseInt(uci.get('wechatpush', section_id, 'client_usage_up_window'));
+			return h > 0 ? String(h * 60) : null;
+		};
 
 		o = s.taboption('content', form.Value, 'client_usage_down_max', _('Download traffic limit'));
 		o.placeholder = '2G';
 		o.rmempty = true;
 		o.depends('client_usage', '1');
 
-		o = s.taboption('content', form.Value, 'client_usage_down_window', _('Download time window (minutes)'));
+		o = s.taboption('content', form.Value, 'client_usage_down_minutes', _('Download time window (minutes)'));
 		o.placeholder = '120';
 		o.default = '120';
 		o.datatype = 'range(5,1440)';
 		o.depends('client_usage', '1');
-		o.description = _('Abnormal traffic alert (byte), you can append K, M or G. This is the total allowed within the selected time window above, not per-minute -- e.g. for a 1-hour window, "500M" means "more than 500MB within any 1-hour period".');
+		o.cfgvalue = function (section_id) {
+			// 兼容早期版本以"小时"保存的 client_usage_down_window
+			var v = uci.get('wechatpush', section_id, 'client_usage_down_minutes');
+			if (v) return v;
+			var h = parseInt(uci.get('wechatpush', section_id, 'client_usage_down_window'));
+			return h > 0 ? String(h * 60) : null;
+		};
 
 		o = s.taboption('content', form.Flag, 'client_usage_disturb', _('Abnormal traffic do not disturb'));
 		o.default = '0';
@@ -590,7 +603,7 @@ return view.extend({
 		o = s.taboption('ipset', form.Flag, 'wifi_auto_ban', _('Auto-ban WiFi devices after repeated auth failures'));
 		o.default = '0';
 		o.depends({ login_notification: "wifi_auth_failed", '!contains': true });
-		o.description = _('Independent of the \"Auto-ban illegal login devices\" switch above. A device (by MAC) is kicked and banned via hostapd; the ban is not persistent across hostapd/router restarts, and devices currently online are never banned.');
+		o.description = _('Independent of the \"Auto-ban illegal login devices\" switch above. A device (by MAC) is kicked and banned via hostapd (deny list / ubus); "banned" is only reported after the ban is confirmed. The ban is lost when hostapd or the router restarts, and devices currently online are never banned.');
 
 		o = s.taboption('ipset', form.Value, 'wifi_max_num', _('WiFi auth failure count'));
 		o.default = '3';
