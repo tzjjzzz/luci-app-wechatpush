@@ -1906,8 +1906,6 @@ msgid "WiFi ban time (minutes)"
 msgstr "WiFi 封禁时长（分钟）"
 
 
-msgid "Failures of the same device within a row (cleared by a successful connection); repeated log lines within 10 seconds count once."
-msgstr "同一设备连续认证失败的次数（成功连接后清零）；10 秒内重复的日志只算一次。"
 
 msgid "How long a banned WiFi device stays blocked. Maximum about 49 days."
 msgstr "被封禁的 WiFi 设备保持封禁的时长，最长约 49 天。"
@@ -1924,8 +1922,6 @@ msgstr "排除的 WireGuard 接口"
 msgid "All WireGuard interfaces are detected automatically (wg show interfaces). List interfaces here only if you do not want push notifications for them, e.g. a tunnel where this router is the client. Requires wireguard-tools (the \"wg\" command) to be installed."
 msgstr "所有 WireGuard 接口会自动发现（wg show interfaces）。只有不想收到推送的接口才需要填在这里，例如本机作为客户端去连接 VPS 的隧道。需要安装 wireguard-tools（wg 命令）。"
 
-msgid "Independent of the \"Auto-ban illegal login devices\" switch above. A device (by MAC) is kicked and banned via hostapd (deny list / ubus); \"banned\" is only reported after the ban is confirmed. The ban is lost when hostapd or the router restarts, and devices currently online are never banned."
-msgstr "与上面的“自动封禁非法登录设备”开关互相独立。设备（按 MAC）会被踢出并通过 hostapd（拒绝列表 / ubus）封禁；只有确认封禁生效后才会推送“已封禁”。hostapd 或路由器重启后封禁失效，当前在线的设备不会被封禁。"
 
 msgid "WiFi auth failure: %s (%s/%s)"
 msgstr "WiFi 认证失败：%s（%s/%s）"
@@ -1941,3 +1937,9 @@ msgstr "WiFi 封禁已到期，设备 %s 已解封"
 
 msgid "WiFi device %s frequent auth failures, ban could not be confirmed"
 msgstr "WiFi 设备 %s 频繁认证失败，但封禁未能确认生效"
+
+msgid "Independent of the \"Auto-ban illegal login devices\" switch above. A device (by MAC) is kicked and banned via hostapd (deny list / ubus); \"banned\" is only reported after the ban is confirmed. The ban is lost when hostapd or the router restarts."
+msgstr "与上面的“自动封禁非法登录设备”开关互相独立。设备（按 MAC）会被踢出并通过 hostapd（拒绝列表 / ubus）封禁；只有确认封禁生效后才会推送“已封禁”。hostapd 或路由器重启后封禁失效。"
+
+msgid "Failures of the same device (every matching hostapd log line counts once; one wrong-password attempt may log several lines)."
+msgstr "同一设备的认证失败次数（每条匹配的 hostapd 失败日志都记一次；一次错误密码的连接可能打出多行日志）。"

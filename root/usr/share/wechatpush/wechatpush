@@ -2491,7 +2491,11 @@ usage_delta() {
 	last_reset=$(awk -v m="$mac" -v d="$d" '$1==m && $2==d{t=$3} END{print t+0}' "$reset_file" 2>/dev/null)
 	last_reset=${last_reset:-0}
 	cutoff=$((now - win)); [ "$last_reset" -gt "$cutoff" ] && cutoff=$last_reset
-	base=$(awk -v mac="$mac" -v c="$cutoff" -v col="$col" '$2==mac && $1>=c {print $col; exit}' "$history_file" 2>/dev/null)
+	# 只接受有效的基准行：总流量>0；方向列(4=下行/5=上行)不能是 -1(记录时后端没给方向数据)，
+	# 也不能出现"总流量>0 但上下行都是 0"(统计后端那一刻没读到方向数据)。
+	# 这类行如果当基准，delta 就等于设备的全部历史累计流量，会把整个累计量当成窗口内产生的而误报；
+	# 旧版本留在历史文件里的这类行也会在这里被忽略
+	base=$(awk -v mac="$mac" -v c="$cutoff" -v col="$col" '$2==mac && $1>=c && $3>0 && (col==3 || ($4>=0 && $5>=0 && ($4+$5)>0)) {print $col; exit}' "$history_file" 2>/dev/null)
 	[ -z "$base" ] && return
 	delta=$((cur - base)); [ "$delta" -lt 0 ] && delta=0
 	echo "$delta"
@@ -2556,7 +2560,9 @@ get_client_usage() {
 			fi
 
 			local d_up="" d_down="" d_total="" hit_up="" hit_down="" hit_total=""
-			if [ "$cur_has_direction" = "1" ] && { [ -n "$up_max" ] || [ -n "$down_max" ]; }; then
+			local dir_ok="0"
+			[ "$cur_has_direction" = "1" ] && [ $((cur_in + cur_out)) -gt 0 ] && dir_ok="1"
+			if [ "$dir_ok" = "1" ] && { [ -n "$up_max" ] || [ -n "$down_max" ]; }; then
 				d_up=$(usage_delta "$mac" up $((up_min * 60)) "$cur_out" 5)
 				d_down=$(usage_delta "$mac" down $((down_min * 60)) "$cur_in" 4)
 				[ -n "$up_max" ] && [ -n "$d_up" ] && [ "$d_up" -ge "$up_max" ] && hit_up="1"
@@ -2596,7 +2602,7 @@ get_client_usage() {
 
 				# 内容：上传、下载都显示（含各自的窗口、增量与阈值）；超标的方向打标记
 				local detail=""
-				if [ "$cur_has_direction" = "1" ] && { [ -n "$up_max" ] || [ -n "$down_max" ]; }; then
+				if [ "$dir_ok" = "1" ] && { [ -n "$up_max" ] || [ -n "$down_max" ]; }; then
 					local up_txt="${d_up:+$(bytes_for_humans "$d_up")}"; [ -z "$up_txt" ] && up_txt="$(translate "collecting")"
 					local down_txt="${d_down:+$(bytes_for_humans "$d_down")}"; [ -z "$down_txt" ] && down_txt="$(translate "collecting")"
 					[ -n "$up_max" ] && up_txt="${up_txt} / $(bytes_for_humans "$up_max")"
@@ -2627,6 +2633,10 @@ ${str_linefeed}${str_tab} - $(translate "Uptime:")${str_space}${str_space}${str_
 				[ -n "$hit_total" ] && echo "$mac total $now" >>"$reset_file"
 			fi
 
+			# 后端没给方向数据，或总流量>0 却读到上下行全 0 时，方向列记为 -1，不当作有效基准
+			if [ "$cur_has_direction" != "1" ] || { [ "$cur_total" -gt 0 ] && [ $((cur_in + cur_out)) -eq 0 ]; }; then
+				cur_in=-1; cur_out=-1
+			fi
 			echo "$now $mac $cur_total $cur_in $cur_out" >>"$history_file"
 		done
 
@@ -2981,7 +2991,7 @@ fail2ban_send() {
 
 # 处理 WiFi 事件
 # 参数: $1 MAC  $2 日志时间  $3 事件类型 wifi_conn | wifi_fail
-# 失败次数按 MAC 计数；同一 MAC 10 秒内的多条失败日志只算一次（一次错误密码连接通常会连续打出好几行），
+# 失败次数按 MAC 计数，每条失败日志都记一次（注意：一次错误密码连接可能打出多行日志），
 # 成功连接后清零。累计达到 wifi_max_num 时，若开启了 wifi_auto_ban 则踢出并封禁该 MAC（与 Web/SSH 的自动封禁开关互相独立）
 process_wifi() {
 	local mac=$(echo "$1" | tr 'A-Z' 'a-z')
@@ -3001,8 +3011,7 @@ process_wifi() {
 		return
 	fi
 
-	# 10 秒内的重复日志只算一次；距上次失败超过 10 分钟则从头计数
-	[ $((now - prev)) -lt 10 ] && return
+	# 每条失败日志都记一次（不再合并）；距上次失败超过 10 分钟则从头计数
 	[ $((now - prev)) -gt 600 ] && unset wifi_failed_counts["$mac"]
 	wifi_last_fail["$mac"]=$now
 	wifi_failed_counts["$mac"]=$((${wifi_failed_counts["$mac"]:-0} + 1))
@@ -3012,7 +3021,6 @@ process_wifi() {
 		wifi_ban_mac "$mac"
 		case $? in
 			0) banned="1" ;;      # 已封禁（已确认）
-			2) banned="" ;;       # 设备当前在线，按设计不封禁
 			*) banned="failed" ;; # 想封禁但没能确认成功
 		esac
 		unset wifi_failed_counts["$mac"]
@@ -3032,15 +3040,12 @@ wifi_ifaces() {
 # 封禁一个 WiFi 设备（按 MAC），只有"确认生效"才返回 0：
 #   方式一 hostapd_cli deny_acl（运行时拒绝列表，随后用 deny_acl SHOW 确认）
 #   方式二 ubus hostapd.<接口> del_client 带 ban_time（随后用 list_bans 确认）
-# 返回值: 0=已封禁并确认  1=尝试了但无法确认  2=设备当前在线，不封禁
-# 封禁时长用独立的 wifi_ban_timeout（分钟）；重启 hostapd/路由器后失效
+# 返回值: 0=已封禁并确认  1=尝试了但无法确认
+# 封禁时长用独立的 wifi_ban_timeout（分钟）；重启 hostapd/路由器后失效。
+# 不再因为"设备在在线列表里"而跳过封禁——设备刚连过时 DHCP/ARP 记录会让它在列表里停留一阵，会导致封禁被悄悄跳过
 wifi_ban_mac() {
 	local mac="$1" ifc ok="" acl_ifaces="" now=$(date +%s)
 	local ban_file="${dir}/wifi_bans"
-	if [ -f "$devices_json" ] && [ -n "$(jq -r --arg mac "$mac" '.devices[] | select((.mac | ascii_downcase) == $mac and .status == "online") | .mac' "$devices_json" 2>/dev/null | head -n1)" ]; then
-		log_change "[INFO] $(translate "WiFi device %s is currently online, not banned" "$mac")"
-		return 2
-	fi
 	local mins=${wifi_ban_timeout:-60}
 	{ [ "$mins" -le 0 ] || [ "$mins" -gt 71582 ]; } 2>/dev/null && mins=71582
 	local secs=$((mins * 60))

@@ -603,13 +603,13 @@ return view.extend({
 		o = s.taboption('ipset', form.Flag, 'wifi_auto_ban', _('Auto-ban WiFi devices after repeated auth failures'));
 		o.default = '0';
 		o.depends({ login_notification: "wifi_auth_failed", '!contains': true });
-		o.description = _('Independent of the \"Auto-ban illegal login devices\" switch above. A device (by MAC) is kicked and banned via hostapd (deny list / ubus); "banned" is only reported after the ban is confirmed. The ban is lost when hostapd or the router restarts, and devices currently online are never banned.');
+		o.description = _('Independent of the \"Auto-ban illegal login devices\" switch above. A device (by MAC) is kicked and banned via hostapd (deny list / ubus); "banned" is only reported after the ban is confirmed. The ban is lost when hostapd or the router restarts.');
 
 		o = s.taboption('ipset', form.Value, 'wifi_max_num', _('WiFi auth failure count'));
 		o.default = '3';
 		o.datatype = 'and(uinteger,min(1))';
 		o.depends('wifi_auto_ban', '1');
-		o.description = _('Failures of the same device within a row (cleared by a successful connection); repeated log lines within 10 seconds count once.');
+		o.description = _('Failures of the same device (every matching hostapd log line counts once; one wrong-password attempt may log several lines).');
 
 		o = s.taboption('ipset', form.Value, 'wifi_ban_timeout', _('WiFi ban time (minutes)'));
 		o.default = '60';
