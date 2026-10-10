@@ -1943,3 +1943,12 @@ msgstr "与上面的“自动封禁非法登录设备”开关互相独立。设
 
 msgid "Failures of the same device (every matching hostapd log line counts once; one wrong-password attempt may log several lines)."
 msgstr "同一设备的认证失败次数（每条匹配的 hostapd 失败日志都记一次；一次错误密码的连接可能打出多行日志）。"
+
+msgid "WiFi ban whitelist"
+msgstr "WiFi 封禁白名单"
+
+msgid "Devices listed here are never banned for WiFi auth failures (the failure is still pushed). Devices that use a randomized MAC need that exact MAC."
+msgstr "这里的设备永远不会因 WiFi 认证失败被封禁（失败仍会推送）。使用随机 MAC 的设备需要填它当前使用的那个 MAC。"
+
+msgid "WiFi device %s is in the ban whitelist, not banned"
+msgstr "WiFi 设备 %s 在封禁白名单中，不封禁"

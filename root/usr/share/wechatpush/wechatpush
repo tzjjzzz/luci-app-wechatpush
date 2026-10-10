@@ -48,7 +48,7 @@ read_config() {
 		"get_ipv4_mode" "ipv4_interface" "get_ipv6_mode" "ipv6_interface" \
 		"device_notification" "cpu_notification" "cpu_load_threshold" "temperature_threshold" \
 		"client_usage" "client_usage_max" "client_usage_window" "client_usage_up_max" "client_usage_up_window" "client_usage_up_minutes" "client_usage_down_max" "client_usage_down_window" "client_usage_down_minutes" "client_usage_disturb" "client_usage_whitelist" \
-		"login_notification" "wifi_auto_ban" "wifi_max_num" "wifi_ban_timeout" "login_max_num" "login_web_black" "login_ip_black_timeout" "login_ip_white_list" "port_knocking_enable" "login_ip_white_timeout" "login_port_white" "login_port_forward_list" \
+		"login_notification" "wifi_auto_ban" "wifi_max_num" "wifi_ban_timeout" "wifi_ban_whitelist" "login_max_num" "login_web_black" "login_ip_black_timeout" "login_ip_white_list" "port_knocking_enable" "login_ip_white_timeout" "login_port_white" "login_port_forward_list" \
 		"crontab_regular_time" "crontab_interval_time" \
 		"do_not_disturb_mode" "do_not_disturb_starttime" "do_not_disturb_endtime" "up_down_push_whitelist" "up_down_push_blacklist" "up_down_push_interface" "mac_online_list" "mac_offline_list" "cpu_threshold_duration" "cpu_notification_delay" "login_disturb" "login_notification_delay" "login_log_enable" \
 		"up_timeout" "down_timeout" "timeout_retry_count" "always_check_ip_list" "only_timeout_push" "passive_mode" "thread_num" "defaultSortColumn" "soc_code" "server_host" "server_port" \
@@ -3021,6 +3021,7 @@ process_wifi() {
 		wifi_ban_mac "$mac"
 		case $? in
 			0) banned="1" ;;      # 已封禁（已确认）
+			2) banned="" ;;       # 白名单设备，不封禁（仍然推送这次失败）
 			*) banned="failed" ;; # 想封禁但没能确认成功
 		esac
 		unset wifi_failed_counts["$mac"]
@@ -3040,12 +3041,20 @@ wifi_ifaces() {
 # 封禁一个 WiFi 设备（按 MAC），只有"确认生效"才返回 0：
 #   方式一 hostapd_cli deny_acl（运行时拒绝列表，随后用 deny_acl SHOW 确认）
 #   方式二 ubus hostapd.<接口> del_client 带 ban_time（随后用 list_bans 确认）
-# 返回值: 0=已封禁并确认  1=尝试了但无法确认
+# 返回值: 0=已封禁并确认  1=尝试了但无法确认  2=在白名单里，不封禁
 # 封禁时长用独立的 wifi_ban_timeout（分钟）；重启 hostapd/路由器后失效。
 # 不再因为"设备在在线列表里"而跳过封禁——设备刚连过时 DHCP/ARP 记录会让它在列表里停留一阵，会导致封禁被悄悄跳过
 wifi_ban_mac() {
 	local mac="$1" ifc ok="" acl_ifaces="" now=$(date +%s)
 	local ban_file="${dir}/wifi_bans"
+	# 白名单里的设备永远不封（MAC 不区分大小写）
+	local wl
+	for wl in $wifi_ban_whitelist; do
+		if [ "$(echo "$wl" | tr 'A-Z' 'a-z')" = "$mac" ]; then
+			log_change "[INFO] $(translate "WiFi device %s is in the ban whitelist, not banned" "$mac")"
+			return 2
+		fi
+	done
 	local mins=${wifi_ban_timeout:-60}
 	{ [ "$mins" -le 0 ] || [ "$mins" -gt 71582 ]; } 2>/dev/null && mins=71582
 	local secs=$((mins * 60))

@@ -617,6 +617,13 @@ return view.extend({
 		o.depends('wifi_auto_ban', '1');
 		o.description = _('How long a banned WiFi device stays blocked. Maximum about 49 days.');
 
+		o = fwtool.addMACOption(s, 'ipset', 'wifi_ban_whitelist', _('WiFi ban whitelist'),
+			_('Please select device MAC'), hosts);
+		o.rmempty = true;
+		o.datatype = 'list(neg(macaddr))';
+		o.depends('wifi_auto_ban', '1');
+		o.description = _('Devices listed here are never banned for WiFi auth failures (the failure is still pushed). Devices that use a randomized MAC need that exact MAC.');
+
 		o = s.taboption('ipset', form.Flag, 'fail2ban_enable', _('Push fail2ban ban/unban events'));
 		o.default = '0';
 		o.description = _('Watches fail2ban\'s own log (independent of the auto-ban feature above) and pushes ban time, banned IP, jail, ban duration, and the matching local device name/MAC if the banned IP happens to belong to one of your own devices.');
