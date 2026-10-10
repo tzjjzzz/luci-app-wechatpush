@@ -259,6 +259,11 @@ return view.extend({
 		o.description = _('One device per line, each with its own SSH port: \"ip:port\" (IPv6: \"[addr]:port\"); without a port, 22 is used.<br/>') + _('echo -e "\\n" | ssh-keygen -t rsa -f /root/.ssh/id_rsa -N ""<br/>ssh root@your_openwrt_ip "mkdir -p /root/.ssh && chmod 700 /root/.ssh && echo $(cat /root/.ssh/id_rsa.pub) >> /etc/dropbear/authorized_keys && chmod 600 /etc/dropbear/authorized_keys"')
 		o.depends({ device_info_helper: "openwrt_info", '!contains': true });
 
+		o = s.option(form.Flag, "wifi_ban_sync", _('Sync WiFi bans to these OpenWrt devices'));
+		o.default = '1';
+		o.depends({ device_info_helper: "openwrt_info", '!contains': true });
+		o.description = _('When the WiFi auto-ban (Auto-ban tab) bans a device, also ban it on the OpenWrt devices listed above over SSH, so it cannot just join them. Only OpenWrt devices running hostapd are supported; others are skipped.');
+
 		o = s.option(form.DynamicList, "wireguard_exclude", _('WireGuard interfaces to exclude'));
 		o.rmempty = true;
 		o.placeholder = 'wg_vps';

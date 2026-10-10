@@ -617,6 +617,11 @@ return view.extend({
 		o.depends('wifi_auto_ban', '1');
 		o.description = _('How long a banned WiFi device stays blocked. Maximum about 49 days.');
 
+		o = s.taboption('ipset', form.Flag, 'wifi_ban_net', _('Also block banned WiFi devices in the firewall'));
+		o.default = '1';
+		o.depends('wifi_auto_ban', '1');
+		o.description = _('Drops all traffic from the banned MAC at this router, so a banned device gets no network even if it joins another access point (any brand, bridge/AP mode). Does not work if the other access point runs in router mode. Requires nftables (firewall4).');
+
 		o = fwtool.addMACOption(s, 'ipset', 'wifi_ban_whitelist', _('WiFi ban whitelist'),
 			_('Please select device MAC'), hosts);
 		o.rmempty = true;

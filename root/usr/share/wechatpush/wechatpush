@@ -48,7 +48,7 @@ read_config() {
 		"get_ipv4_mode" "ipv4_interface" "get_ipv6_mode" "ipv6_interface" \
 		"device_notification" "cpu_notification" "cpu_load_threshold" "temperature_threshold" \
 		"client_usage" "client_usage_max" "client_usage_window" "client_usage_up_max" "client_usage_up_window" "client_usage_up_minutes" "client_usage_down_max" "client_usage_down_window" "client_usage_down_minutes" "client_usage_disturb" "client_usage_whitelist" \
-		"login_notification" "wifi_auto_ban" "wifi_max_num" "wifi_ban_timeout" "wifi_ban_whitelist" "login_max_num" "login_web_black" "login_ip_black_timeout" "login_ip_white_list" "port_knocking_enable" "login_ip_white_timeout" "login_port_white" "login_port_forward_list" \
+		"login_notification" "wifi_auto_ban" "wifi_max_num" "wifi_ban_timeout" "wifi_ban_whitelist" "wifi_ban_sync" "wifi_ban_net" "login_max_num" "login_web_black" "login_ip_black_timeout" "login_ip_white_list" "port_knocking_enable" "login_ip_white_timeout" "login_port_white" "login_port_forward_list" \
 		"crontab_regular_time" "crontab_interval_time" \
 		"do_not_disturb_mode" "do_not_disturb_starttime" "do_not_disturb_endtime" "up_down_push_whitelist" "up_down_push_blacklist" "up_down_push_interface" "mac_online_list" "mac_offline_list" "cpu_threshold_duration" "cpu_notification_delay" "login_disturb" "login_notification_delay" "login_log_enable" \
 		"up_timeout" "down_timeout" "timeout_retry_count" "always_check_ip_list" "only_timeout_push" "passive_mode" "thread_num" "defaultSortColumn" "soc_code" "server_host" "server_port" \
@@ -3038,15 +3038,68 @@ wifi_ifaces() {
 	echo "$l"
 }
 
-# 封禁一个 WiFi 设备（按 MAC），只有"确认生效"才返回 0：
-#   方式一 hostapd_cli deny_acl（运行时拒绝列表，随后用 deny_acl SHOW 确认）
-#   方式二 ubus hostapd.<接口> del_client 带 ban_time（随后用 list_bans 确认）
-# 返回值: 0=已封禁并确认  1=尝试了但无法确认  2=在白名单里，不封禁
-# 封禁时长用独立的 wifi_ban_timeout（分钟）；重启 hostapd/路由器后失效。
-# 不再因为"设备在在线列表里"而跳过封禁——设备刚连过时 DHCP/ARP 记录会让它在列表里停留一阵，会导致封禁被悄悄跳过
+# 封禁结果汇总，供推送显示："本机无线 ✓, 防火墙 ✓, 192.168.1.2 ✓"
+wifi_ban_report_add() {
+	wifi_ban_report="${wifi_ban_report:+${wifi_ban_report}, }$1 $2"
+}
+
+# 网络层封禁：在主路由防火墙里按源 MAC 丢包。
+# 用独立的 nft 表（不受 fw4 重载影响），集合自带超时，到期自动解除。
+# 对任意品牌、桥接模式的 AP 都有效：被封设备哪怕连上了别的 AP，流量到主路由时源 MAC 仍是它自己，会被丢弃，拿不到 IP、上不了网。
+# 注意：副路由是路由模式（自带子网）时，主路由看到的源 MAC 是副路由，此方法无效。
+# 返回值: 0=已封禁并确认  1=失败  3=已关闭
+wifi_ban_firewall() {
+	local mac="$1" secs="$2"
+	[ "$wifi_ban_net" = "0" ] && return 3
+	if ! command -v nft >/dev/null 2>&1; then
+		log_change "[WARN] $(translate "Firewall-level WiFi ban needs nftables (firewall4), skipped")"
+		return 1
+	fi
+	nft list table inet wechatpush_wifi >/dev/null 2>&1 || printf '%s\n' \
+		'table inet wechatpush_wifi {' \
+		'	set mac_black { type ether_addr; flags timeout; }' \
+		'	chain prerouting { type filter hook prerouting priority -310; policy accept; ether saddr @mac_black counter drop comment "wechatpush wifi ban"; }' \
+		'}' | nft -f - >/dev/null 2>&1
+	nft delete element inet wechatpush_wifi mac_black "{ $mac }" >/dev/null 2>&1
+	nft add element inet wechatpush_wifi mac_black "{ $mac timeout ${secs}s }" >/dev/null 2>&1
+	nft list set inet wechatpush_wifi mac_black 2>/dev/null | grep -qi "$mac"
+}
+
+# 把封禁同步到其他 OpenWrt（副路由/AP）。
+# 复用"从其他 OpenWrt 获取信息"里填写的 OpenWrt 列表(op_host_ips，每项可写 ip:端口)和已有的 SSH 密钥，
+# 在对方的 hostapd 上同样执行 ubus 封禁，并用 list_bans 确认。对方封禁自带到期时间。
+# 前提：已启用"从其他 OpenWrt 获取信息"，且没有关闭 wifi_ban_sync
+wifi_ban_sync_remote() {
+	local mac="$1" secs="$2" entry host port res ms=$(( $2 * 1000 ))
+	[ -z "$openwrt_info_enable" ] && return
+	[ "$wifi_ban_sync" = "0" ] && return
+	[ -z "$op_host_ips" ] && return
+	local remote_cmd="aps=\$(ubus list 'hostapd.*' 2>/dev/null); [ -z \"\$aps\" ] && { echo NOAP; exit 0; }; for o in \$aps; do ubus call \"\$o\" del_client '{\"addr\":\"$mac\",\"reason\":5,\"deauth\":true,\"ban_time\":$ms}' >/dev/null 2>&1; done; for o in \$aps; do ubus call \"\$o\" list_bans 2>/dev/null | grep -qi '$mac' && { echo BANNED; break; }; done"
+	for entry in $op_host_ips; do
+		read -r host port <<<"$(op_ssh_target "$entry")"
+		res=$(run_with_tag ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o BatchMode=yes -p "$port" -i /root/.ssh/id_rsa root@"$host" "$remote_cmd" 2>/dev/null)
+		if echo "$res" | grep -q BANNED; then
+			wifi_ban_report_add "$host" "✓"; wifi_ban_any_ok="1"
+			log_change "[INFO] $(translate "WiFi ban of %s synced to OpenWrt %s" "$mac" "$host")"
+		elif echo "$res" | grep -q NOAP; then
+			log_change "[INFO] $(translate "OpenWrt %s has no hostapd, ban sync skipped" "$host")"
+		else
+			wifi_ban_report_add "$host" "✗"
+			log_change "[WARN] $(translate "WiFi ban of %s could not be synced to OpenWrt %s (SSH failed or ban not confirmed)" "$mac" "$host")"
+		fi
+	done
+}
+
+# 封禁一个 WiFi 设备（按 MAC）。三层，互相独立，任意一层确认生效即视为已封禁：
+#   1. 本机无线：hostapd_cli deny_acl（可用时）和 ubus ban_time，并用 deny_acl SHOW / list_bans 确认
+#   2. 主路由防火墙：按源 MAC 丢包（对任意 AP 生效，见 wifi_ban_firewall）
+#   3. 其他 OpenWrt：SSH 同步（见 wifi_ban_sync_remote）
+# 返回值: 0=至少一层确认生效  1=都没能确认  2=在白名单里，不封禁
+# 封禁时长用独立的 wifi_ban_timeout（分钟）；本机无线封禁在 hostapd/路由器重启后失效
 wifi_ban_mac() {
 	local mac="$1" ifc ok="" acl_ifaces="" now=$(date +%s)
 	local ban_file="${dir}/wifi_bans"
+	wifi_ban_report=""; wifi_ban_any_ok=""
 	# 白名单里的设备永远不封（MAC 不区分大小写）
 	local wl
 	for wl in $wifi_ban_whitelist; do
@@ -3059,6 +3112,7 @@ wifi_ban_mac() {
 	{ [ "$mins" -le 0 ] || [ "$mins" -gt 71582 ]; } 2>/dev/null && mins=71582
 	local secs=$((mins * 60))
 
+	# 1. 本机无线
 	for ifc in $(wifi_ifaces); do
 		if command -v hostapd_cli >/dev/null 2>&1; then
 			hostapd_cli -i "$ifc" deny_acl ADD_MAC "$mac" >/dev/null 2>&1
@@ -3069,18 +3123,33 @@ wifi_ban_mac() {
 		ubus call "hostapd.${ifc}" del_client "{\"addr\":\"$mac\",\"reason\":5,\"deauth\":true,\"ban_time\":$((secs * 1000))}" >/dev/null 2>&1
 		ubus call "hostapd.${ifc}" list_bans 2>/dev/null | grep -qi "$mac" && ok="${ok} ${ifc}:ubus"
 	done
-
-	if [ -z "$ok" ]; then
+	if [ -n "$ok" ]; then
+		wifi_ban_report_add "$(translate "Local WiFi")" "✓"; wifi_ban_any_ok="1"
+		# 只有 ACL 方式需要我们自己到期解封（ubus 的封禁自带到期时间）
+		if [ -n "$acl_ifaces" ]; then
+			[ -f "$ban_file" ] && sed -i "/^$mac /d" "$ban_file"
+			echo "$mac $((now + secs)) ${acl_ifaces# }" >>"$ban_file"
+		fi
+		log_change "[INFO] $(translate "WiFi device %s banned for %s minutes (%s)" "$mac" "$mins" "${ok# }")"
+	else
+		wifi_ban_report_add "$(translate "Local WiFi")" "✗"
 		log_change "[WARN] $(translate "WiFi ban of %s could not be confirmed (hostapd_cli missing or hostapd rejected it)" "$mac")"
-		return 1
 	fi
-	# 只有 ACL 方式需要我们自己到期解封（ubus 的封禁自带到期时间）
-	if [ -n "$acl_ifaces" ]; then
-		[ -f "$ban_file" ] && sed -i "/^$mac /d" "$ban_file"
-		echo "$mac $((now + secs)) ${acl_ifaces# }" >>"$ban_file"
-	fi
-	log_change "[INFO] $(translate "WiFi device %s banned for %s minutes (%s)" "$mac" "$mins" "${ok# }")"
-	return 0
+
+	# 2. 主路由防火墙
+	wifi_ban_firewall "$mac" "$secs"
+	case $? in
+		0) wifi_ban_report_add "$(translate "Firewall")" "✓"; wifi_ban_any_ok="1"
+		   log_change "[INFO] $(translate "WiFi device %s blocked in firewall for %s minutes" "$mac" "$mins")" ;;
+		3) ;;
+		*) wifi_ban_report_add "$(translate "Firewall")" "✗" ;;
+	esac
+
+	# 3. 其他 OpenWrt
+	wifi_ban_sync_remote "$mac" "$secs"
+
+	[ -n "$wifi_ban_any_ok" ] && return 0
+	return 1
 }
 
 # 到期解封（主循环每轮调用）：移除 hostapd deny_acl 里到期的 MAC
@@ -3143,6 +3212,7 @@ wifi_send() {
 	w_content="${w_content}${str_linefeed}${str_tab} - $(translate "Client MAC:")${str_space}${str_space}${mac}"
 	[ -n "$dname" ] && w_content="${w_content}${str_linefeed}${str_tab} - $(translate "Client Name:")${str_space}${str_space}${dname}"
 	[ -n "$dip" ] && w_content="${w_content}${str_linefeed}${str_tab} - $(translate "Client IP:")${str_space}${str_space}${dip}"
+	[ -n "$banned" ] && [ -n "$wifi_ban_report" ] && w_content="${w_content}${str_linefeed}${str_tab} - $(translate "Ban methods:")${str_space}${str_space}${wifi_ban_report}"
 
 	disturb
 	local disturb_RETVAL=$?

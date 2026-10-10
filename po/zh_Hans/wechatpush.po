@@ -1952,3 +1952,42 @@ msgstr "这里的设备永远不会因 WiFi 认证失败被封禁（失败仍会
 
 msgid "WiFi device %s is in the ban whitelist, not banned"
 msgstr "WiFi 设备 %s 在封禁白名单中，不封禁"
+
+
+
+
+msgid "WiFi ban of %s synced to OpenWrt %s"
+msgstr "已把对 %s 的 WiFi 封禁同步到 OpenWrt %s"
+
+msgid "OpenWrt %s has no hostapd, ban sync skipped"
+msgstr "OpenWrt %s 没有 hostapd，跳过封禁同步"
+
+msgid "WiFi ban of %s could not be synced to OpenWrt %s (SSH failed or ban not confirmed)"
+msgstr "无法把对 %s 的 WiFi 封禁同步到 OpenWrt %s（SSH 失败或封禁未确认）"
+
+msgid "Sync WiFi bans to these OpenWrt devices"
+msgstr "同步 WiFi 封禁到这些 OpenWrt"
+
+msgid "When the WiFi auto-ban (Auto-ban tab) bans a device, also ban it on the OpenWrt devices listed above over SSH, so it cannot just join them. Only OpenWrt devices running hostapd are supported; others are skipped."
+msgstr "WiFi 自动封禁（“自动封禁”页）封禁某个设备时，也通过 SSH 在上面列出的 OpenWrt 上封禁它，避免它直接去连这些设备。仅支持运行 hostapd 的 OpenWrt，其余会被跳过。"
+
+msgid "Also block banned WiFi devices in the firewall"
+msgstr "同时在防火墙中拦截被封禁的 WiFi 设备"
+
+msgid "Drops all traffic from the banned MAC at this router, so a banned device gets no network even if it joins another access point (any brand, bridge/AP mode). Does not work if the other access point runs in router mode. Requires nftables (firewall4)."
+msgstr "在本路由丢弃被封 MAC 的所有流量：即使它连上了别的 AP（任意品牌，桥接/AP 模式），也拿不到网络。对方 AP 是路由模式时无效。需要 nftables（firewall4）。"
+
+msgid "Ban methods:"
+msgstr "封禁方式："
+
+msgid "Local WiFi"
+msgstr "本机无线"
+
+msgid "Firewall"
+msgstr "防火墙"
+
+msgid "WiFi device %s blocked in firewall for %s minutes"
+msgstr "WiFi 设备 %s 已在防火墙中封禁 %s 分钟"
+
+msgid "Firewall-level WiFi ban needs nftables (firewall4), skipped"
+msgstr "防火墙级 WiFi 封禁需要 nftables（firewall4），已跳过"
