@@ -47,7 +47,7 @@ read_config() {
 		"jsonpath" "sckey" "sc3key" "sc3uid" "sc3tags" "corpid" "userid" "agentid" "corpsecret" "mediapath" "wxpusher_apptoken" "wxpusher_uids" "wxpusher_topicIds" "pushplus_token" "tg_api_server" "tg_token" "tg_chat_id" "tg_thread_id" "recipient_email" "smtp_host" "smtp_port" "smtp_tls" "smtp_starttls" "smtp_user" "smtp_passwordeval" "smtp_from" "smtp_from_full_name" \
 		"get_ipv4_mode" "ipv4_interface" "get_ipv6_mode" "ipv6_interface" \
 		"device_notification" "cpu_notification" "cpu_load_threshold" "temperature_threshold" \
-		"client_usage" "client_usage_max" "client_usage_window" "client_usage_up_max" "client_usage_up_window" "client_usage_up_minutes" "client_usage_down_max" "client_usage_down_window" "client_usage_down_minutes" "client_usage_disturb" "client_usage_whitelist" \
+		"client_usage" "client_usage_max" "client_usage_window" "client_usage_up_max" "client_usage_up_window" "client_usage_up_minutes" "client_usage_down_max" "client_usage_down_window" "client_usage_down_minutes" "client_usage_disturb" "client_usage_whitelist" "client_usage_scan_interval" "net_scan_interval" "cpu_scan_interval" "wireguard_scan_interval" "unattended_scan_interval" \
 		"login_notification" "wifi_auto_ban" "wifi_max_num" "wifi_ban_timeout" "wifi_ban_whitelist" "wifi_ban_sync" "wifi_ban_net" "login_max_num" "login_web_black" "login_ip_black_timeout" "login_ip_white_list" "port_knocking_enable" "login_ip_white_timeout" "login_port_white" "login_port_forward_list" \
 		"crontab_regular_time" "crontab_interval_time" \
 		"do_not_disturb_mode" "do_not_disturb_starttime" "do_not_disturb_endtime" "up_down_push_whitelist" "up_down_push_blacklist" "up_down_push_interface" "mac_online_list" "mac_offline_list" "cpu_threshold_duration" "cpu_notification_delay" "login_disturb" "login_notification_delay" "login_log_enable" \
@@ -398,7 +398,7 @@ main() {
 		usage update
 
 		# 网络状态与 IP 变动
-		if [ "$get_ipv4_mode" -ne "0" ] || [ "$get_ipv6_mode" -ne "0" ]; then
+		if { [ "$get_ipv4_mode" -ne "0" ] || [ "$get_ipv6_mode" -ne "0" ]; } && scan_due net "$net_scan_interval"; then
 			check_connect
 			ip_changes
 		fi
@@ -419,10 +419,10 @@ main() {
 		[ -n "$content" ] && [ ! -f "${dir}/send_enable.lock" ] && current_device
 
 		# 无人值守任务
-		[ ! -f "${dir}/send_enable.lock" ] && unattended
+		[ ! -f "${dir}/send_enable.lock" ] && scan_due unattended "$unattended_scan_interval" && unattended
 
 		# CPU 检测
-		[ ! -f "${dir}/send_enable.lock" ] && check_cpu_load
+		[ ! -f "${dir}/send_enable.lock" ] && scan_due cpu "$cpu_scan_interval" && check_cpu_load
 
 		# 硬盘检测
 		#[ ! -f "${dir}/send_enable.lock" ] && get_disk
@@ -1952,6 +1952,8 @@ getwireguard() {
 		log_change "[DEBUG] $(translate "WireGuard discovery skipped: not enabled in device_info_helper")"
 		return
 	fi
+	# 独立的扫描间隔：没到时间就整体跳过，保留上一轮的 wireguard_iplist 和状态
+	scan_due wireguard "$wireguard_scan_interval" || return
 	unset wireguard_iplist
 	command -v wg >/dev/null 2>&1 || {
 		log_change "[WARN] $(translate "wireguard-tools (wg command) not installed, unable to get WireGuard peer information")"
@@ -1977,6 +1979,8 @@ getwireguard() {
 	fi
 
 	local wg_handshake_fresh_seconds=180
+	# 扫描间隔拉长时，"最近有动静"的判定窗口也要跟着放宽，否则两次扫描之间会被误判成断开
+	[ -n "$wireguard_scan_interval" ] && [ "$wireguard_scan_interval" -gt 0 ] 2>/dev/null && [ $((wireguard_scan_interval * 2)) -gt "$wg_handshake_fresh_seconds" ] && wg_handshake_fresh_seconds=$((wireguard_scan_interval * 2))
 	local now=$(date +%s)
 	local state_file="${dir}/wireguard_state"
 	local new_state=""
@@ -2482,12 +2486,23 @@ parse_bytes() {
 	esac 2>/dev/null
 }
 
+# 各功能独立的扫描间隔（秒）。留空或 0 = 跟随主循环的"检测间隔"，每一轮都执行。
+# 返回 0 = 这一轮该执行；1 = 还没到时间。主循环每 sleeptime 秒才醒一次，所以实际间隔不会小于检测间隔
+scan_due() {
+	local name="$1" interval="$2" now=$(date +%s) last
+	{ [ -z "$interval" ] || [ "$interval" -le 0 ]; } 2>/dev/null && return 0
+	eval "last=\${scan_last_${name}:-0}"
+	[ $((now - last)) -ge "$interval" ] || return 1
+	eval "scan_last_${name}=$now"
+	return 0
+}
+
 # 窗口内的流量增量。基准 = "窗口起点"与"该方向上次触发重置时间"中较晚者之后的第一条快照；
 # 窗口内没有快照（设备刚上线、还没攒够窗口时长）时不输出，避免把连接前就存在的累计流量误判成爆量。
 # 参数: $1 MAC  $2 方向 up|down|total  $3 窗口(秒)  $4 当前累计值  $5 历史文件里的列号(3=总 4=下行 5=上行)
 # 依赖调用者(get_client_usage)里的局部变量 now / history_file / reset_file
 usage_delta() {
-	local mac="$1" d="$2" win="$3" cur="$4" col="$5" cutoff last_reset base delta
+	local mac="$1" d="$2" win="$3" cur="$4" col="$5" cutoff last_reset base base_ts delta
 	last_reset=$(awk -v m="$mac" -v d="$d" '$1==m && $2==d{t=$3} END{print t+0}' "$reset_file" 2>/dev/null)
 	last_reset=${last_reset:-0}
 	cutoff=$((now - win)); [ "$last_reset" -gt "$cutoff" ] && cutoff=$last_reset
@@ -2495,10 +2510,12 @@ usage_delta() {
 	# 也不能出现"总流量>0 但上下行都是 0"(统计后端那一刻没读到方向数据)。
 	# 这类行如果当基准，delta 就等于设备的全部历史累计流量，会把整个累计量当成窗口内产生的而误报；
 	# 旧版本留在历史文件里的这类行也会在这里被忽略
-	base=$(awk -v mac="$mac" -v c="$cutoff" -v col="$col" '$2==mac && $1>=c && $3>0 && (col==3 || ($4>=0 && $5>=0 && ($4+$5)>0)) {print $col; exit}' "$history_file" 2>/dev/null)
+	base=$(awk -v mac="$mac" -v c="$cutoff" -v col="$col" '$2==mac && $1>=c && $3>0 && (col==3 || ($4>=0 && $5>=0 && ($4+$5)>0)) {print $col, $1; exit}' "$history_file" 2>/dev/null)
 	[ -z "$base" ] && return
+	read -r base base_ts <<<"$base"
 	delta=$((cur - base)); [ "$delta" -lt 0 ] && delta=0
-	echo "$delta"
+	# 输出: 增量  基准快照的时间戳（用来算"从开始计数到现在实际过了多久"）
+	echo "$delta $base_ts"
 }
 
 # 设备异常流量检测
@@ -2540,7 +2557,10 @@ get_client_usage() {
 	local usage_title_set=""
 
 	# 每 5 分钟记录一次快照并检查一次
-	if [ "$((now - get_client_usage_time))" -ge "300" ]; then
+	# 快照/检查间隔（秒）：高级设置里可调，默认 300；最小 30（主循环本身每 sleeptime 秒才醒一次）
+	local usage_interval="${client_usage_scan_interval:-300}"
+	[ "$usage_interval" -lt 30 ] 2>/dev/null && usage_interval=30
+	if [ "$((now - get_client_usage_time))" -ge "$usage_interval" ]; then
 		local mac cur_total cur_in cur_out cur_has_direction
 		for mac in $MACLIST; do
 			read -r cur_total cur_in cur_out cur_has_direction <<<"$(get_usage_stats "$mac")"
@@ -2559,19 +2579,26 @@ get_client_usage() {
 				log_change "[WARN] $(translate "Traffic backend provides no upload/download split, per-direction alert skipped")"
 			fi
 
-			local d_up="" d_down="" d_total="" hit_up="" hit_down="" hit_total=""
+			local d_up="" d_down="" d_total="" up_ts="" down_ts="" total_ts="" hit_up="" hit_down="" hit_total=""
 			local dir_ok="0"
 			[ "$cur_has_direction" = "1" ] && [ $((cur_in + cur_out)) -gt 0 ] && dir_ok="1"
 			if [ "$dir_ok" = "1" ] && { [ -n "$up_max" ] || [ -n "$down_max" ]; }; then
-				d_up=$(usage_delta "$mac" up $((up_min * 60)) "$cur_out" 5)
-				d_down=$(usage_delta "$mac" down $((down_min * 60)) "$cur_in" 4)
+				read -r d_up up_ts <<<"$(usage_delta "$mac" up $((up_min * 60)) "$cur_out" 5)"
+				read -r d_down down_ts <<<"$(usage_delta "$mac" down $((down_min * 60)) "$cur_in" 4)"
 				[ -n "$up_max" ] && [ -n "$d_up" ] && [ "$d_up" -ge "$up_max" ] && hit_up="1"
 				[ -n "$down_max" ] && [ -n "$d_down" ] && [ "$d_down" -ge "$down_max" ] && hit_down="1"
 			fi
 			if [ -n "$total_max" ]; then
-				d_total=$(usage_delta "$mac" total $((total_hours * 3600)) "$cur_total" 3)
+				read -r d_total total_ts <<<"$(usage_delta "$mac" total $((total_hours * 3600)) "$cur_total" 3)"
 				[ -n "$d_total" ] && [ "$d_total" -ge "$total_max" ] && hit_total="1"
 			fi
+
+			# 从开始计数（窗口起点或上次触发重置）到现在实际过了多久，四舍五入到分钟，至少 1 分钟；
+			# 推送里显示这个实际时长，而不是设置里的窗口长度
+			local up_el="$up_min" down_el="$down_min" total_el=$((total_hours * 60))
+			[ -n "$up_ts" ] && up_el=$(( (now - up_ts + 30) / 60 )) && [ "$up_el" -lt 1 ] && up_el=1
+			[ -n "$down_ts" ] && down_el=$(( (now - down_ts + 30) / 60 )) && [ "$down_el" -lt 1 ] && down_el=1
+			[ -n "$total_ts" ] && total_el=$(( (now - total_ts + 30) / 60 )) && [ "$total_el" -lt 1 ] && total_el=1
 
 			if [ -n "$hit_up$hit_down$hit_total" ]; then
 				local ip=$(jq -r --arg mac "$mac" '.devices[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase) and .status == "online") | .ip' "$devices_json")
@@ -2582,9 +2609,9 @@ get_client_usage() {
 
 				# 标题：(设备) 在 (分钟) 内上传超过 (阈值)；上传下载同时超标时两段并列
 				local dev_title=""
-				[ -n "$hit_up" ] && dev_title="$(translate "within %s min uploaded over %s" "$up_min" "$(bytes_for_humans "$up_max")")"
-				[ -n "$hit_down" ] && dev_title="${dev_title:+${dev_title}, }$(translate "within %s min downloaded over %s" "$down_min" "$(bytes_for_humans "$down_max")")"
-				[ -n "$hit_total" ] && dev_title="$(translate "within %s hour(s) traffic over %s" "$total_hours" "$(bytes_for_humans "$total_max")")"
+				[ -n "$hit_up" ] && dev_title="$(translate "within %s min uploaded over %s" "$up_el" "$(bytes_for_humans "$up_max")")"
+				[ -n "$hit_down" ] && dev_title="${dev_title:+${dev_title}, }$(translate "within %s min downloaded over %s" "$down_el" "$(bytes_for_humans "$down_max")")"
+				[ -n "$hit_total" ] && dev_title="$(translate "within %s min traffic over %s" "$total_el" "$(bytes_for_humans "$total_max")")"
 				dev_title="${ip_name} ${dev_title}"
 
 				local content_title=""
@@ -2609,10 +2636,10 @@ get_client_usage() {
 					[ -n "$down_max" ] && down_txt="${down_txt} / $(bytes_for_humans "$down_max")"
 					[ -n "$hit_up" ] && up_txt="${up_txt} ⚠"
 					[ -n "$hit_down" ] && down_txt="${down_txt} ⚠"
-					detail="${str_linefeed}${str_tab} - $(translate "Upload in %s min:" "$up_min")${str_space}${str_space}${up_txt}"
-					detail="${detail}${str_linefeed}${str_tab} - $(translate "Download in %s min:" "$down_min")${str_space}${str_space}${down_txt}"
+					detail="${str_linefeed}${str_tab} - $(translate "Upload in %s min:" "$up_el")${str_space}${str_space}${up_txt}"
+					detail="${detail}${str_linefeed}${str_tab} - $(translate "Download in %s min:" "$down_el")${str_space}${str_space}${down_txt}"
 				fi
-				[ -n "$hit_total" ] && detail="${detail}${str_linefeed}${str_tab} - $(translate "Traffic in %s hour(s):" "$total_hours")${str_space}${str_space}$(bytes_for_humans "$d_total")"
+				[ -n "$hit_total" ] && detail="${detail}${str_linefeed}${str_tab} - $(translate "Traffic in %s min:" "$total_el")${str_space}${str_space}$(bytes_for_humans "$d_total")"
 
 				local detail_dbm=""
 				local wxjk_dbm=$(get_signal_dbm "$mac")
@@ -2640,7 +2667,10 @@ ${str_linefeed}${str_tab} - $(translate "Uptime:")${str_space}${str_space}${str_
 			echo "$now $mac $cur_total $cur_in $cur_out" >>"$history_file"
 		done
 
-		[ -f "$history_file" ] && awk -v cutoff="$((now - 86400))" '$1>=cutoff' "$history_file" >"${history_file}.tmp" 2>/dev/null && mv "${history_file}.tmp" "$history_file"
+		if [ "$((now - ${client_usage_clean_time:-0}))" -ge 600 ]; then
+			[ -f "$history_file" ] && awk -v cutoff="$((now - 86400))" '$1>=cutoff' "$history_file" >"${history_file}.tmp" 2>/dev/null && mv "${history_file}.tmp" "$history_file"
+			client_usage_clean_time=$now
+		fi
 		[ -f "$reset_file" ] && awk '{k=$1" "$2; t[k]=$3} END{for(k in t) print k, t[k]}' "$reset_file" >"${reset_file}.tmp" 2>/dev/null && mv "${reset_file}.tmp" "$reset_file"
 		get_client_usage_time=$now
 	fi

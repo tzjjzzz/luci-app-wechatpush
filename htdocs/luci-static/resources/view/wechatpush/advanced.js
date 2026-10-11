@@ -286,6 +286,33 @@ return view.extend({
 		o.depends({ device_info_helper: "openwrt_info", '!contains': true });
 		o.depends({ device_info_helper: "scan_local_ip", '!contains': true });
 
+	// 各功能独立的扫描间隔
+	o = s.option(form.Value, 'net_scan_interval', _('Network / IP change scan interval (s)'));
+	o.datatype = 'uinteger';
+	o.placeholder = _('Follow check interval');
+	o.description = _('Leave empty to follow the Check Interval (runs every cycle). It cannot be shorter than the Check Interval.');
+
+	o = s.option(form.Value, 'cpu_scan_interval', _('CPU load / temperature scan interval (s)'));
+	o.datatype = 'uinteger';
+	o.placeholder = _('Follow check interval');
+	o.description = _('Leave empty to follow the Check Interval (runs every cycle). It cannot be shorter than the Check Interval.');
+
+	o = s.option(form.Value, 'client_usage_scan_interval', _('Abnormal traffic scan interval (s)'));
+	o.datatype = 'and(uinteger,min(30))';
+	o.placeholder = '300';
+	o.description = _('How often traffic is sampled and compared against the limits. A shorter interval makes the reported time (from start of counting to exceeding the limit) more precise, at the cost of a larger history file.');
+
+	o = s.option(form.Value, 'wireguard_scan_interval', _('WireGuard scan interval (s)'));
+	o.datatype = 'uinteger';
+	o.placeholder = _('Follow check interval');
+	o.description = _('Leave empty to follow the Check Interval (runs every cycle). It cannot be shorter than the Check Interval.');
+	o.depends({ device_info_helper: "wireguard_info", '!contains': true });
+
+	o = s.option(form.Value, 'unattended_scan_interval', _('Unattended task scan interval (s)'));
+	o.datatype = 'uinteger';
+	o.placeholder = _('Follow check interval');
+	o.description = _('Leave empty to follow the Check Interval (runs every cycle). It cannot be shorter than the Check Interval.');
+
 		o = s.option(form.ListValue, 'usage_backend', _('Traffic statistics source'));
 		o.value('wrtbwmon', 'wrtbwmon');
 		o.value('bandix', 'bandix-plus');

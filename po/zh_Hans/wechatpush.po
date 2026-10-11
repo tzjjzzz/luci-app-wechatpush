@@ -1991,3 +1991,33 @@ msgstr "WiFi 设备 %s 已在防火墙中封禁 %s 分钟"
 
 msgid "Firewall-level WiFi ban needs nftables (firewall4), skipped"
 msgstr "防火墙级 WiFi 封禁需要 nftables（firewall4），已跳过"
+
+msgid "within %s min traffic over %s"
+msgstr "在 %s 分钟内流量超过 %s"
+
+msgid "Traffic in %s min:"
+msgstr "%s 分钟内流量："
+
+msgid "Network / IP change scan interval (s)"
+msgstr "网络 / IP 变动扫描间隔（秒）"
+
+msgid "CPU load / temperature scan interval (s)"
+msgstr "CPU 负载 / 温度扫描间隔（秒）"
+
+msgid "Abnormal traffic scan interval (s)"
+msgstr "异常流量扫描间隔（秒）"
+
+msgid "WireGuard scan interval (s)"
+msgstr "WireGuard 扫描间隔（秒）"
+
+msgid "Unattended task scan interval (s)"
+msgstr "无人值守任务扫描间隔（秒）"
+
+msgid "Follow check interval"
+msgstr "跟随检测间隔"
+
+msgid "Leave empty to follow the Check Interval (runs every cycle). It cannot be shorter than the Check Interval."
+msgstr "留空则跟随“检测间隔”（每轮都执行）。不能短于检测间隔。"
+
+msgid "How often traffic is sampled and compared against the limits. A shorter interval makes the reported time (from start of counting to exceeding the limit) more precise, at the cost of a larger history file."
+msgstr "流量的采样与对比频率。间隔越短，推送里报告的时间（从开始计数到超过阈值）越精确，代价是历史文件更大。"
