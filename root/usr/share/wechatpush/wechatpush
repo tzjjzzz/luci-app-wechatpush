@@ -1762,6 +1762,45 @@ op_ssh_target() {
 	echo "$host $port"
 }
 
+# SSH 到其他 OpenWrt 执行一条命令，返回远端标准输出，用 ssh 自身的退出码判断"连上了没"
+# （不依赖远端命令的业务结果，所以对所有调用点通用）。
+# 兼容两种常见情况：路由器上的 "ssh" 实际是 dropbear 的 dbclient，而不是 OpenSSH：
+#   - dbclient 不认识 OpenSSH 的 -o 选项（只打印一行警告，不影响连接，已靠 2>/dev/null 吞掉）
+#   - 如果强行指定一个 dbclient 读不懂格式的私钥（比如新版 ssh-keygen 默认的 OpenSSH 格式），
+#     dbclient 会直接报错退出，而不是像 OpenSSH 那样跳过这把钥匙继续尝试别的认证方式
+# 所以这里反过来：先完全不指定 -i，让客户端自己走默认身份（代理/内置默认私钥/这台设备本来就允许的免密登录，
+# 实测很多副路由/AP 就是这种），这是最常见也最该优先的路径；
+# 如果那样连不上，再依次尝试 /root/.ssh/ 下实际存在的 id_* 私钥文件（不关心具体叫 id_rsa 还是
+# id_dropbear 还是别的名字，有什么就试什么），每个试到 ssh 连接成功为止；
+# 都没有可用的身份文件、也没法免密登录时，自然返回失败，调用方按原来的方式处理空结果
+# 用法: op_ssh <host> <port> <远端命令>
+op_ssh() {
+	local host="$1" port="$2" cmd="$3" out rc id errf
+	errf=$(mktemp "${dir}/op_ssh_err.XXXXXX" 2>/dev/null) || errf="${dir}/op_ssh_err"
+	out=$(run_with_tag ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o BatchMode=yes -p "$port" root@"$host" "$cmd" 2>"$errf")
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		rm -f "$errf" 2>/dev/null
+		echo "$out"; return 0
+	fi
+	# 失败原因不再丢弃：写进调试日志，方便排查到底是没找到这把钥匙、格式不对、还是认证被拒绝
+	log_change "[DEBUG] $(translate "SSH %s:%s (no identity) failed, rc=%s: %s" "$host" "$port" "$rc" "$(head -n1 "$errf" 2>/dev/null)")"
+	for id in /root/.ssh/id_*; do
+		[ -f "$id" ] || continue
+		case "$id" in *.pub) continue ;; esac
+		out=$(run_with_tag ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o BatchMode=yes -p "$port" -i "$id" root@"$host" "$cmd" 2>"$errf")
+		rc=$?
+		if [ "$rc" -eq 0 ]; then
+			rm -f "$errf" 2>/dev/null
+			echo "$out"; return 0
+		fi
+		log_change "[DEBUG] $(translate "SSH %s:%s with identity %s failed, rc=%s: %s" "$host" "$port" "$id" "$rc" "$(head -n1 "$errf" 2>/dev/null)")"
+	done
+	rm -f "$errf" 2>/dev/null
+	echo "$out"
+	return "$rc"
+}
+
 # 从 openwrt 获取设备信息
 getopenwrt() {
 	[ -z "$openwrt_info_enable" ] && return
@@ -1772,15 +1811,15 @@ getopenwrt() {
 		for op_host_entry in $op_host_ips; do
 			local op_host_ip op_host_sshport
 			read -r op_host_ip op_host_sshport <<<"$(op_ssh_target "$op_host_entry")"
-			local wlan_interfaces=$(run_with_tag ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -p "$op_host_sshport" -i /root/.ssh/id_rsa root@$op_host_ip 'iw dev 2>/dev/null | grep Interface | awk '\''{print $2}'\''')
-			local leases_info=$(run_with_tag ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -p "$op_host_sshport" -i /root/.ssh/id_rsa root@$op_host_ip "cat /tmp/dhcp.leases 2>/dev/null")
-			local arp_info=$(run_with_tag ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -p "$op_host_sshport" -i /root/.ssh/id_rsa root@$op_host_ip "cat /proc/net/arp | grep '0x[26]' | grep -v '^169.254.' | grep -v '^$' | sort -u 2>/dev/null")
+			local wlan_interfaces=$(op_ssh "$op_host_ip" "$op_host_sshport" 'iw dev 2>/dev/null | grep Interface | awk '\''{print $2}'\''')
+			local leases_info=$(op_ssh "$op_host_ip" "$op_host_sshport" "cat /tmp/dhcp.leases 2>/dev/null")
+			local arp_info=$(op_ssh "$op_host_ip" "$op_host_sshport" "cat /proc/net/arp | grep '0x[26]' | grep -v '^169.254.' | grep -v '^\$' | sort -u 2>/dev/null")
 			local openwrt_arp_iplist+="$(echo "$arp_info" | awk '{print $1}')"$'\n'
 
 			# 遍历每个接口
 			for iface in $wlan_interfaces; do
 				# 获取接口信息
-				local info=$(run_with_tag ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -p "$op_host_sshport" -i /root/.ssh/id_rsa root@$op_host_ip "iw dev $iface info 2>/dev/null")
+				local info=$(op_ssh "$op_host_ip" "$op_host_sshport" "iw dev $iface info 2>/dev/null")
 
 				# 获取频道和频段
 				local channel=$(echo "$info" | grep channel | awk '{print $2}')
@@ -1792,7 +1831,7 @@ getopenwrt() {
 				fi
 
 				# 获取连接的设备列表
-				local devices=$(run_with_tag ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -p "$op_host_sshport" -i /root/.ssh/id_rsa root@$op_host_ip "iw dev $iface station dump 2>/dev/null")
+				local devices=$(op_ssh "$op_host_ip" "$op_host_sshport" "iw dev $iface station dump 2>/dev/null")
 
 				# 逐行输出设备信息
 				while read -r line; do
@@ -3107,7 +3146,7 @@ wifi_ban_sync_remote() {
 	local remote_cmd="aps=\$(ubus list 'hostapd.*' 2>/dev/null); [ -z \"\$aps\" ] && { echo NOAP; exit 0; }; for o in \$aps; do ubus call \"\$o\" del_client '{\"addr\":\"$mac\",\"reason\":5,\"deauth\":true,\"ban_time\":$ms}' >/dev/null 2>&1; done; for o in \$aps; do ubus call \"\$o\" list_bans 2>/dev/null | grep -qi '$mac' && { echo BANNED; break; }; done"
 	for entry in $op_host_ips; do
 		read -r host port <<<"$(op_ssh_target "$entry")"
-		res=$(run_with_tag ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o BatchMode=yes -p "$port" -i /root/.ssh/id_rsa root@"$host" "$remote_cmd" 2>/dev/null)
+		res=$(op_ssh "$host" "$port" "$remote_cmd")
 		if echo "$res" | grep -q BANNED; then
 			wifi_ban_report_add "$host" "✓"; wifi_ban_any_ok="1"
 			log_change "[INFO] $(translate "WiFi ban of %s synced to OpenWrt %s" "$mac" "$host")"

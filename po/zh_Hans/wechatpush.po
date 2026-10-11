@@ -2021,3 +2021,9 @@ msgstr "留空则跟随“检测间隔”（每轮都执行）。不能短于检
 
 msgid "How often traffic is sampled and compared against the limits. A shorter interval makes the reported time (from start of counting to exceeding the limit) more precise, at the cost of a larger history file."
 msgstr "流量的采样与对比频率。间隔越短，推送里报告的时间（从开始计数到超过阈值）越精确，代价是历史文件更大。"
+
+msgid "SSH %s:%s (no identity) failed, rc=%s: %s"
+msgstr "SSH %s:%s（未指定密钥）失败，rc=%s：%s"
+
+msgid "SSH %s:%s with identity %s failed, rc=%s: %s"
+msgstr "SSH %s:%s 使用密钥 %s 失败，rc=%s：%s"
