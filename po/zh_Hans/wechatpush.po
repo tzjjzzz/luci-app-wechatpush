@@ -2030,3 +2030,9 @@ msgstr "SSH %s:%s 使用密钥 %s 失败，rc=%s：%s"
 
 msgid "no error output"
 msgstr "无错误输出"
+
+msgid "SSH %s:%s login succeeded (no identity needed)"
+msgstr "SSH %s:%s 登录成功（无需指定密钥）"
+
+msgid "SSH %s:%s login succeeded with identity %s (earlier attempts failed and were skipped)"
+msgstr "SSH %s:%s 使用密钥 %s 登录成功（前面失败的尝试已忽略）"

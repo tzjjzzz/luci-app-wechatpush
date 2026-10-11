@@ -771,12 +771,19 @@ getmac() {
 	local mac_count=$(jq -r --arg mac "$mac" '.devices[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase)) | .mac' "$devices_json" | wc -l)
 	[ "$mac_count" -eq 1 ] && process_and_check "$mac" && return
 
-	# DHCP
-	[ -f "/tmp/dhcp.leases" ] && mac=$(grep -w "${ip}" "/tmp/dhcp.leases" | awk '{print $2}')
+	# DHCP（按 IP 列精确匹配，只取第一条）
+	[ -f "/tmp/dhcp.leases" ] && mac=$(awk -v ip="$ip" '$3==ip {print $2; exit}' "/tmp/dhcp.leases")
 	process_and_check "$mac" && return
 
-	# ARP
-	mac=$(cat /proc/net/arp | grep "0x2\|0x6" | grep -w "${ip}" | awk '{print $4}')
+	# ARP（按 IP 列精确匹配，只取第一条）。
+	# 同一个 IP 可能出现在多个接口上（比如同时在 br-lan 和 guest1），process_and_check 会把多行的换行直接删掉，
+	# 两个 MAC 就拼成了一串；所以这里必须只取一条
+	mac=$(awk -v ip="$ip" '($3=="0x2" || $3=="0x6") && $1==ip && $4!="00:00:00:00:00:00" {print $4; exit}' /proc/net/arp)
+	process_and_check "$mac" && return
+
+	# 本机查不到时，到其他 OpenWrt 的 ARP 表里找（两边互补）：
+	# 路由器自己的地址不会出现在自己的 ARP 表里，但对方的 ARP 表里有；找不到就算了，继续走后面的流程
+	[ -f "${dir}/openwrt_arp" ] && mac=$(awk -v ip="$ip" '$1==ip {print $2; exit}' "${dir}/openwrt_arp")
 	process_and_check "$mac" && return
 
 	# 定时推送时不查询
@@ -1781,38 +1788,55 @@ op_ssh_target() {
 # 都没有可用的身份文件、也没法免密登录时，自然返回失败，调用方按原来的方式处理空结果
 # 用法: op_ssh <host> <port> <远端命令>
 op_ssh() {
-	local host="$1" port="$2" cmd="$3" out rc id errf err
+	local host="$1" port="$2" cmd="$3" out rc id errf err fails="" key statef method
 	# dropbear 的 ssh 不指定 -i 时，默认读 $HOME/.ssh/id_dropbear。插件由系统服务启动，环境里的 HOME 通常是 "/"
 	# （内核给 init 的默认值），于是找不到默认密钥，报 "No auth methods could be used"；
 	# 手动登录没问题是因为那时 HOME=/root。下面每次调用都显式带上 HOME=/root
 	errf=$(mktemp "${dir}/op_ssh_err.XXXXXX" 2>/dev/null) || errf="${dir}/op_ssh_err"
+	key=$(echo "${host}_${port}" | tr -c 'A-Za-z0-9_.-' '_')
+	statef="${dir}/op_ssh_ok_${key}"
 	# ssh 的退出码默认就是"远端命令的退出码"（grep 没匹配、cat 的文件不存在都会是 1），
 	# 会被误判成"连不上"。命令后面补一个 true，让退出码只反映连接/认证是否成功
 	cmd="${cmd}; true"
 	# 失败原因：去掉 dropbear 无害的警告（不认识 -o ConnectTimeout 之类、跳过主机密钥检查），取剩下最后 2 行
 	_op_ssh_err() { grep -v -e 'Ignoring unknown configuration option' -e 'skipping hostkey check' "$1" 2>/dev/null | grep -v '^$' | tail -n 2 | tr '\n' '|'; }
+	# 登录成功提示：只在"方式变了/第一次成功/失败后恢复"时记一条，不会每轮都刷；
+	# 前面失败的尝试如果后来连上了就不再报错（只在这条提示里说明是回退成功的）
+	_op_ssh_ok() {
+		method="$1"
+		if [ "$(cat "$statef" 2>/dev/null)" != "$method" ]; then
+			if [ -z "$fails" ]; then
+				log_change "[INFO] $(translate "SSH %s:%s login succeeded (no identity needed)" "$host" "$port")"
+			else
+				log_change "[INFO] $(translate "SSH %s:%s login succeeded with identity %s (earlier attempts failed and were skipped)" "$host" "$port" "$method")"
+			fi
+			echo "$method" >"$statef"
+		fi
+		rm -f "$errf" 2>/dev/null
+	}
 	out=$(HOME=/root run_with_tag ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o BatchMode=yes -p "$port" root@"$host" "$cmd" 2>"$errf")
 	rc=$?
 	if [ "$rc" -eq 0 ]; then
-		rm -f "$errf" 2>/dev/null
+		_op_ssh_ok "-"
 		echo "$out"; return 0
 	fi
-	# 失败原因不再丢弃：写进调试日志，方便排查到底是没找到这把钥匙、格式不对、还是认证被拒绝
 	err=$(_op_ssh_err "$errf")
-	log_change "[DEBUG] $(translate "SSH %s:%s (no identity) failed, rc=%s: %s" "$host" "$port" "$rc" "${err:-$(translate "no error output")}")"
+	fails="$(translate "SSH %s:%s (no identity) failed, rc=%s: %s" "$host" "$port" "$rc" "${err:-$(translate "no error output")}")"$'\n'
 	for id in /root/.ssh/id_*; do
 		[ -f "$id" ] || continue
 		case "$id" in *.pub) continue ;; esac
 		out=$(HOME=/root run_with_tag ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o BatchMode=yes -p "$port" -i "$id" root@"$host" "$cmd" 2>"$errf")
 		rc=$?
 		if [ "$rc" -eq 0 ]; then
-			rm -f "$errf" 2>/dev/null
+			_op_ssh_ok "$id"
 			echo "$out"; return 0
 		fi
 		err=$(_op_ssh_err "$errf")
-		log_change "[DEBUG] $(translate "SSH %s:%s with identity %s failed, rc=%s: %s" "$host" "$port" "$id" "$rc" "${err:-$(translate "no error output")}")"
+		fails="${fails}$(translate "SSH %s:%s with identity %s failed, rc=%s: %s" "$host" "$port" "$id" "$rc" "${err:-$(translate "no error output")}")"$'\n'
 	done
-	rm -f "$errf" 2>/dev/null
+	# 所有方式都失败了才把每次的失败原因写进调试日志
+	echo "$fails" | grep -v '^$' | while IFS= read -r line; do log_change "[DEBUG] $line"; done
+	rm -f "$errf" "$statef" 2>/dev/null
 	echo "$out"
 	return "$rc"
 }
@@ -1824,6 +1848,7 @@ getopenwrt() {
 	if [ "$last_openwrt_time" -ge "$device_info_helper_sleeptime" ]; then
 		# 初始化一个空数组（bash 数组）
 		local json_array=()
+		local arp_pairs=""
 		for op_host_entry in $op_host_ips; do
 			local op_host_ip op_host_sshport
 			read -r op_host_ip op_host_sshport <<<"$(op_ssh_target "$op_host_entry")"
@@ -1831,6 +1856,8 @@ getopenwrt() {
 			local leases_info=$(op_ssh "$op_host_ip" "$op_host_sshport" "cat /tmp/dhcp.leases 2>/dev/null")
 			local arp_info=$(op_ssh "$op_host_ip" "$op_host_sshport" "cat /proc/net/arp | grep '0x[26]' | grep -v '^169.254.' | grep -v '^\$' | sort -u 2>/dev/null")
 			local openwrt_arp_iplist+="$(echo "$arp_info" | awk '{print $1}')"$'\n'
+			# 记下对方 ARP 表里的 "IP MAC"（去掉全 0 的无效条目），供 getmac 在本机查不到时补全
+			arp_pairs+="$(echo "$arp_info" | awk 'NF>=4 && $4!="00:00:00:00:00:00" {print $1, $4}')"$'\n'
 
 			# 遍历每个接口
 			for iface in $wlan_interfaces; do
@@ -1885,6 +1912,8 @@ getopenwrt() {
 		done
 		# 使用 jq 输出最终的 JSON 数组
 		echo "${json_array[@]}" | jq -s . > "${dir}/openwrt_info"
+		# 这次一条都没取到（比如 SSH 全部失败）就保留上一次的结果，不要用空文件覆盖
+		[ -n "$(echo "$arp_pairs" | grep -v '^$')" ] && echo "$arp_pairs" | grep -v '^$' | sort -u >"${dir}/openwrt_arp"
 		openwrt_iplist=$(jq -r '.[] | select(.ip != "unknown" and .ip != "") | .ip' "${dir}/openwrt_info")
 		openwrt_iplist+=$'\n'"$openwrt_arp_iplist"
 	else
