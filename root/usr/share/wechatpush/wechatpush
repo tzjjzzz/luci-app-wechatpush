@@ -668,6 +668,12 @@ run_with_tag() {
 	# 如果是 BusyBox 的 applet，调用 wechatpush-call
 	if [[ "$command_path" == *"busybox"* ]]; then
 		/usr/libexec/wechatpush-call child "$command_name" "$@"
+	elif [[ "$command_path" == *"dropbear"* ]]; then
+		# dropbear 是多合一程序（dropbearmulti），靠 argv[0] 判断自己扮演 ssh / dbclient / scp 中的哪一个。
+		# 下面的 exec -a 会把 argv[0] 改成带进程标记的名字，它就认不出自己，只打印
+		# "Dropbear SSH multi-purpose ..." 的用法说明并以 1 退出（SSH 同步全部失败的真正原因）。
+		# 所以对 dropbear 不做进程名标记，直接按原名运行
+		"$command_name" "$@"
 	else
 		bash -c 'exec -a "$0" "$@"' "${PROCESS_TAG} ${command_name}" "$command_name" "$@"
 	fi
