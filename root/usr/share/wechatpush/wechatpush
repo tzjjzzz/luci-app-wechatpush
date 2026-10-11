@@ -1782,13 +1782,16 @@ op_ssh_target() {
 # 用法: op_ssh <host> <port> <远端命令>
 op_ssh() {
 	local host="$1" port="$2" cmd="$3" out rc id errf err
+	# dropbear 的 ssh 不指定 -i 时，默认读 $HOME/.ssh/id_dropbear。插件由系统服务启动，环境里的 HOME 通常是 "/"
+	# （内核给 init 的默认值），于是找不到默认密钥，报 "No auth methods could be used"；
+	# 手动登录没问题是因为那时 HOME=/root。下面每次调用都显式带上 HOME=/root
 	errf=$(mktemp "${dir}/op_ssh_err.XXXXXX" 2>/dev/null) || errf="${dir}/op_ssh_err"
 	# ssh 的退出码默认就是"远端命令的退出码"（grep 没匹配、cat 的文件不存在都会是 1），
 	# 会被误判成"连不上"。命令后面补一个 true，让退出码只反映连接/认证是否成功
 	cmd="${cmd}; true"
 	# 失败原因：去掉 dropbear 无害的警告（不认识 -o ConnectTimeout 之类、跳过主机密钥检查），取剩下最后 2 行
 	_op_ssh_err() { grep -v -e 'Ignoring unknown configuration option' -e 'skipping hostkey check' "$1" 2>/dev/null | grep -v '^$' | tail -n 2 | tr '\n' '|'; }
-	out=$(run_with_tag ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o BatchMode=yes -p "$port" root@"$host" "$cmd" 2>"$errf")
+	out=$(HOME=/root run_with_tag ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o BatchMode=yes -p "$port" root@"$host" "$cmd" 2>"$errf")
 	rc=$?
 	if [ "$rc" -eq 0 ]; then
 		rm -f "$errf" 2>/dev/null
@@ -1800,7 +1803,7 @@ op_ssh() {
 	for id in /root/.ssh/id_*; do
 		[ -f "$id" ] || continue
 		case "$id" in *.pub) continue ;; esac
-		out=$(run_with_tag ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o BatchMode=yes -p "$port" -i "$id" root@"$host" "$cmd" 2>"$errf")
+		out=$(HOME=/root run_with_tag ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o BatchMode=yes -p "$port" -i "$id" root@"$host" "$cmd" 2>"$errf")
 		rc=$?
 		if [ "$rc" -eq 0 ]; then
 			rm -f "$errf" 2>/dev/null
