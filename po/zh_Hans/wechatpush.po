@@ -2027,3 +2027,6 @@ msgstr "SSH %s:%s（未指定密钥）失败，rc=%s：%s"
 
 msgid "SSH %s:%s with identity %s failed, rc=%s: %s"
 msgstr "SSH %s:%s 使用密钥 %s 失败，rc=%s：%s"
+
+msgid "no error output"
+msgstr "无错误输出"
