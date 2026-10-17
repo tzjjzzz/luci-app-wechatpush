@@ -524,6 +524,8 @@ return view.extend({
 		o.value('ssh_logged', _('SSH Login'));
 		o.value('web_login_failed', _('Frequent Web Login Errors'));
 		o.value('ssh_login_failed', _('Frequent SSH Login Errors'));
+		o.value('wifi_connected', _('WiFi Connection Reminder'));
+		o.value('wifi_auth_failed', _('WiFi Auth Failure Reminder'));
 		o.modalonly = true;
 
 		o = s.taboption('content', form.Value, 'login_max_num', _('Login failure count'));
@@ -538,21 +540,42 @@ return view.extend({
 		o.description = _('Please ensure that you can retrieve device traffic information correctly, otherwise this feature will not work properly');
 		o.default = '0';
 
-		o = s.taboption('content', form.ListValue, 'client_usage_window', _('Traffic alert time window'));
-		o.value('1', _('1 hour'));
-		o.value('2', _('2 hours'));
-		o.value('5', _('5 hours'));
-		o.value('12', _('12 hours'));
-		o.value('24', _('24 hours'));
-		o.default = '1';
+		o = s.taboption('content', form.Value, 'client_usage_up_max', _('Upload traffic limit'));
+		o.placeholder = '500M';
+		o.rmempty = true;
 		o.depends('client_usage', '1');
-		o.description = _('How far back to look when checking traffic. A freshly-connected device is never compared against traffic from before it connected, so this cannot false-positive on connect.');
+		o.description = _('Upload and download are checked independently; whichever exceeds its own limit within its own time window triggers a push, and only that direction is reset afterwards. Append K, M or G. Needs a traffic backend that reports upload/download separately.');
 
-		o = s.taboption('content', form.Value, 'client_usage_max', _('Traffic limit within the time window'));
-		o.placeholder = '10M';
-		o.rmempty = false;
+		o = s.taboption('content', form.Value, 'client_usage_up_minutes', _('Upload time window (minutes)'));
+		o.placeholder = '60';
+		o.default = '60';
+		o.datatype = 'range(5,1440)';
 		o.depends('client_usage', '1');
-		o.description = _('Abnormal traffic alert (byte), you can append K, M or G. This is the total allowed within the selected time window above, not per-minute -- e.g. for a 1-hour window, "500M" means "more than 500MB within any 1-hour period".');
+		o.cfgvalue = function (section_id) {
+			// 兼容早期版本以"小时"保存的 client_usage_up_window
+			var v = uci.get('wechatpush', section_id, 'client_usage_up_minutes');
+			if (v) return v;
+			var h = parseInt(uci.get('wechatpush', section_id, 'client_usage_up_window'));
+			return h > 0 ? String(h * 60) : null;
+		};
+
+		o = s.taboption('content', form.Value, 'client_usage_down_max', _('Download traffic limit'));
+		o.placeholder = '2G';
+		o.rmempty = true;
+		o.depends('client_usage', '1');
+
+		o = s.taboption('content', form.Value, 'client_usage_down_minutes', _('Download time window (minutes)'));
+		o.placeholder = '120';
+		o.default = '120';
+		o.datatype = 'range(5,1440)';
+		o.depends('client_usage', '1');
+		o.cfgvalue = function (section_id) {
+			// 兼容早期版本以"小时"保存的 client_usage_down_window
+			var v = uci.get('wechatpush', section_id, 'client_usage_down_minutes');
+			if (v) return v;
+			var h = parseInt(uci.get('wechatpush', section_id, 'client_usage_down_window'));
+			return h > 0 ? String(h * 60) : null;
+		};
 
 		o = s.taboption('content', form.Flag, 'client_usage_disturb', _('Abnormal traffic do not disturb'));
 		o.default = '0';
@@ -576,6 +599,35 @@ return view.extend({
 		o.datatype = 'and(uinteger,min(0))';
 		o.depends('login_web_black', '1');
 		o.description = _('\"0\" in ipset means permanent blacklist, use with caution. If misconfigured, change the device IP and clear rules in LUCI.<br/>Note: The whitelist for bans is located under the \"Do Not Disturb\" tab.');
+
+		o = s.taboption('ipset', form.Flag, 'wifi_auto_ban', _('Auto-ban WiFi devices after repeated auth failures'));
+		o.default = '0';
+		o.depends({ login_notification: "wifi_auth_failed", '!contains': true });
+		o.description = _('Independent of the \"Auto-ban illegal login devices\" switch above. A device (by MAC) is kicked and banned via hostapd (deny list / ubus); "banned" is only reported after the ban is confirmed. The ban is lost when hostapd or the router restarts.');
+
+		o = s.taboption('ipset', form.Value, 'wifi_max_num', _('WiFi auth failure count'));
+		o.default = '3';
+		o.datatype = 'and(uinteger,min(1))';
+		o.depends('wifi_auto_ban', '1');
+		o.description = _('Failures of the same device (every matching hostapd log line counts once; one wrong-password attempt may log several lines).');
+
+		o = s.taboption('ipset', form.Value, 'wifi_ban_timeout', _('WiFi ban time (minutes)'));
+		o.default = '60';
+		o.datatype = 'range(1,71582)';
+		o.depends('wifi_auto_ban', '1');
+		o.description = _('How long a banned WiFi device stays blocked. Maximum about 49 days.');
+
+		o = s.taboption('ipset', form.Flag, 'wifi_ban_net', _('Also block banned WiFi devices in the firewall'));
+		o.default = '1';
+		o.depends('wifi_auto_ban', '1');
+		o.description = _('Drops all traffic from the banned MAC at this router, so a banned device gets no network even if it joins another access point (any brand, bridge/AP mode). Does not work if the other access point runs in router mode. Requires nftables (firewall4).');
+
+		o = fwtool.addMACOption(s, 'ipset', 'wifi_ban_whitelist', _('WiFi ban whitelist'),
+			_('Please select device MAC'), hosts);
+		o.rmempty = true;
+		o.datatype = 'list(neg(macaddr))';
+		o.depends('wifi_auto_ban', '1');
+		o.description = _('Devices listed here are never banned for WiFi auth failures (the failure is still pushed). Devices that use a randomized MAC need that exact MAC.');
 
 		o = s.taboption('ipset', form.Flag, 'fail2ban_enable', _('Push fail2ban ban/unban events'));
 		o.default = '0';
