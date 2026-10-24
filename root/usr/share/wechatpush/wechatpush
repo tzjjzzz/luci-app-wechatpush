@@ -55,7 +55,7 @@ read_config() {
 		"unattended_enable" "zerotier_helper" "unattended_only_on_disturb_time" "unattended_device_aliases" "network_disconnect_event" "unattended_autoreboot_mode" "autoreboot_system_uptime" "autoreboot_network_uptime" \
 		"device_info_helper" "gateway_host_url" "gateway_info_url" "gateway_logout_url" "gateway_username_id" "gateway_password_id" "gateway_username" "gateway_password" "miwifi_ip" "miwifi_password" "mikrotik_ip" "mikrotik_username" "op_host_ips" "scan_ip_range" "device_info_helper_sleeptime" \
 		"lan_interface" "wireguard_exclude" \
-		"usage_backend" "bandix_api_host" "bandix_api_port" "client_usage_max_rate" \
+		"usage_backend" "bandix_api_host" "bandix_api_port" "client_usage_fresh_time" "client_usage_fresh_tolerance" \
 		"font_title" "font_success" "font_fail" "font_client" "font_module" \
 		"fail2ban_enable"
 
@@ -2580,22 +2580,19 @@ scan_due() {
 #   如果到期时设备已经很久没有读数（断线跨过了窗口结束），直接开新窗口、从 0 重新计算
 # - 累计值倒退（统计后端重启、同一 MAC 读到另一行较小的值）时，不把"回到原来的值"当成新增流量；
 #   连续 3 次都低于参考值，才认定计数器真的被清零，改用新的参考值（第一次掉到低值的那一段不计入，宁可少算一段也不误报）
-# - 两次读数之间的增量折算成速率，超过 client_usage_max_rate（MB/s，默认 500，0=关闭）时，
-#   视为统计后端读数跳变而不是真实流量：这一段增量不计入，并在输出里报告被忽略的字节数
 # 参数: $1 MAC  $2 方向 up|down|total  $3 窗口(秒)  $4 当前累计值
-# 输出: <窗口内累计增量> <窗口起点> <被忽略的字节数>
+# 输出: <窗口内累计增量> <窗口起点>
 # 依赖调用者(get_client_usage)里的局部变量 now / state_file / usage_interval
 usage_track() {
 	local mac="$1" d="$2" win="$3" cur="$4"
-	local cap=$(( ${client_usage_max_rate:-500} * 1048576 ))
 	local gap=$(( ${usage_interval:-300} * 3 + 120 ))
 	local tmp="${state_file}.tmp"
 	[ -f "$state_file" ] || : >"$state_file"
-	awk -v mac="$mac" -v d="$d" -v win="$win" -v cur="$cur" -v now="$now" -v cap="$cap" -v gap="$gap" -v tmp="$tmp" '
+	awk -v mac="$mac" -v d="$d" -v win="$win" -v cur="$cur" -v now="$now" -v gap="$gap" -v tmp="$tmp" '
 		$1==mac && $2==d { found=1; ws=$3+0; acc=$4+0; ref=$5+0; last=$6+0; lts=$7+0; low=$8+0; next }
 		{ print > tmp }
 		END {
-			cur+=0; now+=0; win+=0; cap+=0; gap+=0; skipped=0
+			cur+=0; now+=0; win+=0; gap+=0
 			if (!found || (now-ws >= win && now-lts > gap)) {
 				ws=now; acc=0; ref=cur; last=cur; lts=now; low=0; out_acc=0; out_ws=now
 			} else {
@@ -2608,14 +2605,12 @@ usage_track() {
 					low++
 					if (low >= 3) { ref=cur; low=0 }
 				}
-				dt=now-lts; if (dt < 1) dt=1
-				if (cap > 0 && inc > cap*dt) { skipped=inc; inc=0 }
 				acc+=inc; last=cur; lts=now
 				out_acc=acc; out_ws=ws
 				if (now-ws >= win) { ws=now; acc=0 }
 			}
 			printf "%s %s %.0f %.0f %.0f %.0f %.0f %d\n", mac, d, ws, acc, ref, last, lts, low > tmp
-			printf "%.0f %.0f %.0f\n", out_acc, out_ws, skipped
+			printf "%.0f %.0f\n", out_acc, out_ws
 		}' "$state_file" 2>/dev/null && mv "$tmp" "$state_file" 2>/dev/null
 }
 
@@ -2624,6 +2619,34 @@ usage_track_reset() {
 	local tmp="${state_file}.tmp"
 	[ -f "$state_file" ] || return
 	awk -v mac="$1" -v d="$2" -v now="$now" '$1==mac && $2==d {$3=now; $4=0} {print}' "$state_file" >"$tmp" 2>/dev/null && mv "$tmp" "$state_file"
+}
+
+# 重新定基准：窗口起点=现在、累计清零、参考值=当前读数。用于确认某次"增量"其实是读数假象之后
+# 参数: $1 MAC  $2 方向  $3 当前累计值
+usage_track_rebase() {
+	local tmp="${state_file}.tmp"
+	[ -f "$state_file" ] || return
+	awk -v mac="$1" -v d="$2" -v cur="$3" -v now="$now" '$1==mac && $2==d {$3=now; $4=0; $5=cur; $6=cur; $7=now; $8=0} {print}' "$state_file" >"$tmp" 2>/dev/null && mv "$tmp" "$state_file"
+}
+
+# 刚连上的设备触发报警时，如果窗口内的增量总和 ≈ 它的总累计流量（误差在容差内），
+# 说明基准读数约等于 0（统计后端刚开始统计这台设备，或前后读到了不同的行），
+# "增量"其实是历史累计而不是真实流量。每次连接只抑制一次：之后如果大流量还在继续，下一次检查会正常报出。
+# 参数: $1 MAC  $2 本次连接开始时间戳  $3 总累计  $4 窗口增量总和   返回 0=应抑制  1=正常报警
+# 可调: client_usage_fresh_time(秒, 默认 300, 0=关闭)  client_usage_fresh_tolerance(默认 100M)
+usage_fresh_suppress() {
+	local mac="$1" up_at="$2" total="$3" sum="$4"
+	local fresh_time="${client_usage_fresh_time:-300}" tol diff
+	tol=$(parse_bytes "${client_usage_fresh_tolerance:-100M}"); [ -z "$tol" ] && tol=104857600
+	[ "$fresh_time" -gt 0 ] 2>/dev/null || return 1
+	[ -n "$up_at" ] && [ "$up_at" -gt 0 ] 2>/dev/null || return 1
+	[ "$((now - up_at))" -lt "$fresh_time" ] || return 1
+	diff=$((total - sum)); [ "$diff" -lt 0 ] && diff=$((0 - diff))
+	[ "$diff" -le "$tol" ] || return 1
+	local done_file="${dir}/client_usage_fresh_done"
+	grep -qx "$mac $up_at" "$done_file" 2>/dev/null && return 1
+	echo "$mac $up_at" >>"$done_file"
+	return 0
 }
 
 # 设备异常流量检测
@@ -2686,20 +2709,17 @@ get_client_usage() {
 				log_change "[WARN] $(translate "Traffic backend provides no upload/download split, per-direction alert skipped")"
 			fi
 
-			local d_up="" d_down="" d_total="" up_ts="" down_ts="" total_ts="" up_skip="" down_skip="" total_skip="" hit_up="" hit_down="" hit_total=""
+			local d_up="" d_down="" d_total="" up_ts="" down_ts="" total_ts="" hit_up="" hit_down="" hit_total=""
 			local dir_ok="0"
 			[ "$cur_has_direction" = "1" ] && [ $((cur_in + cur_out)) -gt 0 ] && dir_ok="1"
 			if [ "$dir_ok" = "1" ] && { [ -n "$up_max" ] || [ -n "$down_max" ]; }; then
-				read -r d_up up_ts up_skip <<<"$(usage_track "$mac" up $((up_min * 60)) "$cur_out")"
-				read -r d_down down_ts down_skip <<<"$(usage_track "$mac" down $((down_min * 60)) "$cur_in")"
-				[ "${up_skip:-0}" -gt 0 ] && log_change "[WARN] $(translate "Traffic reading of %s (%s) jumped by %s, ignored as a statistics backend glitch" "$mac" "up" "$(bytes_for_humans "$up_skip")")"
-				[ "${down_skip:-0}" -gt 0 ] && log_change "[WARN] $(translate "Traffic reading of %s (%s) jumped by %s, ignored as a statistics backend glitch" "$mac" "down" "$(bytes_for_humans "$down_skip")")"
+				read -r d_up up_ts <<<"$(usage_track "$mac" up $((up_min * 60)) "$cur_out")"
+				read -r d_down down_ts <<<"$(usage_track "$mac" down $((down_min * 60)) "$cur_in")"
 				[ -n "$up_max" ] && [ -n "$d_up" ] && [ "$d_up" -ge "$up_max" ] && hit_up="1"
 				[ -n "$down_max" ] && [ -n "$d_down" ] && [ "$d_down" -ge "$down_max" ] && hit_down="1"
 			fi
 			if [ -n "$total_max" ]; then
-				read -r d_total total_ts total_skip <<<"$(usage_track "$mac" total $((total_hours * 3600)) "$cur_total")"
-				[ "${total_skip:-0}" -gt 0 ] && log_change "[WARN] $(translate "Traffic reading of %s (%s) jumped by %s, ignored as a statistics backend glitch" "$mac" "total" "$(bytes_for_humans "$total_skip")")"
+				read -r d_total total_ts <<<"$(usage_track "$mac" total $((total_hours * 3600)) "$cur_total")"
 				[ -n "$d_total" ] && [ "$d_total" -ge "$total_max" ] && hit_total="1"
 			fi
 
@@ -2709,6 +2729,17 @@ get_client_usage() {
 			[ -n "$up_ts" ] && up_el=$(( (now - up_ts + 30) / 60 )) && [ "$up_el" -lt 1 ] && up_el=1
 			[ -n "$down_ts" ] && down_el=$(( (now - down_ts + 30) / 60 )) && [ "$down_el" -lt 1 ] && down_el=1
 			[ -n "$total_ts" ] && total_el=$(( (now - total_ts + 30) / 60 )) && [ "$total_el" -lt 1 ] && total_el=1
+
+			# 刚连上就"超标"、且增量≈总累计的假报警：只压一次，并重新定基准（见 usage_fresh_suppress）
+			if [ -n "$hit_up$hit_down$hit_total" ]; then
+				local fresh_up=$(jq -r --arg mac "$mac" '.devices[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase) and .status == "online") | .uptime' "$devices_json" | head -n1)
+				local fresh_sum=$(( ${d_up:-0} + ${d_down:-0} )); [ -n "$hit_total" ] && fresh_sum="$d_total"
+				if usage_fresh_suppress "$mac" "$fresh_up" "$cur_total" "$fresh_sum"; then
+					log_change "[WARN] $(translate "Traffic alert for %s suppressed once: the increment %s is about equal to its total traffic %s right after connecting (likely a statistics backend glitch)" "$mac" "$(bytes_for_humans "$fresh_sum")" "$(bytes_for_humans "$cur_total")")"
+					usage_track_rebase "$mac" up "$cur_out"; usage_track_rebase "$mac" down "$cur_in"; usage_track_rebase "$mac" total "$cur_total"
+					hit_up=""; hit_down=""; hit_total=""
+				fi
+			fi
 
 			if [ -n "$hit_up$hit_down$hit_total" ]; then
 				local ip=$(jq -r --arg mac "$mac" '.devices[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase) and .status == "online") | .ip' "$devices_json")
@@ -2775,6 +2806,7 @@ ${str_linefeed}${str_tab} - $(translate "Uptime:")${str_space}${str_space}${str_
 		# 每 10 分钟清掉超过 2 天没有读数的状态行（设备已不在了）
 		if [ "$((now - ${client_usage_clean_time:-0}))" -ge 600 ]; then
 			[ -f "$state_file" ] && awk -v cutoff="$((now - 172800))" '$7>=cutoff' "$state_file" >"${state_file}.tmp" 2>/dev/null && mv "${state_file}.tmp" "$state_file"
+			[ -f "${dir}/client_usage_fresh_done" ] && awk -v cutoff="$((now - 172800))" '$2>=cutoff' "${dir}/client_usage_fresh_done" >"${dir}/client_usage_fresh_done.tmp" 2>/dev/null && mv "${dir}/client_usage_fresh_done.tmp" "${dir}/client_usage_fresh_done"
 			client_usage_clean_time=$now
 		fi
 		get_client_usage_time=$now
