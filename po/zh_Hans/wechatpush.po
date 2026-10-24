@@ -2039,3 +2039,6 @@ msgstr "SSH %s:%s 登录成功（无需指定密钥）"
 
 msgid "SSH %s:%s login succeeded with identity %s (earlier attempts failed and were skipped)"
 msgstr "SSH %s:%s 使用密钥 %s 登录成功（前面失败的尝试已忽略）"
+
+msgid "Traffic reading of %s (%s) jumped by %s, ignored as a statistics backend glitch"
+msgstr "%s 的流量读数（%s）异常跳变了 %s，判定为统计后端读数异常，已忽略"

@@ -55,7 +55,7 @@ read_config() {
 		"unattended_enable" "zerotier_helper" "unattended_only_on_disturb_time" "unattended_device_aliases" "network_disconnect_event" "unattended_autoreboot_mode" "autoreboot_system_uptime" "autoreboot_network_uptime" \
 		"device_info_helper" "gateway_host_url" "gateway_info_url" "gateway_logout_url" "gateway_username_id" "gateway_password_id" "gateway_username" "gateway_password" "miwifi_ip" "miwifi_password" "mikrotik_ip" "mikrotik_username" "op_host_ips" "scan_ip_range" "device_info_helper_sleeptime" \
 		"lan_interface" "wireguard_exclude" \
-		"usage_backend" "bandix_api_host" "bandix_api_port" \
+		"usage_backend" "bandix_api_host" "bandix_api_port" "client_usage_max_rate" \
 		"font_title" "font_success" "font_fail" "font_client" "font_module" \
 		"fail2ban_enable"
 
@@ -2257,21 +2257,11 @@ up() {
 		# 如果是待二次离线检测 unknown 设备，json 文件中依然有信息，修改在线状态为 online
 		if [ "$mac" != "unknown" ] && jq -e --arg ip "$ip" --arg mac "$mac" '.devices[] | select(.ip == $ip and (.mac | ascii_downcase) == ($mac | ascii_downcase)) | .mac' "$devices_json" >/dev/null; then
 			jq --arg ip "$ip" --arg mac "$mac" '.devices |= map(if .ip == $ip then .mac = $mac | .status = "online" else . end)' "$devices_json" >"$tmp_devices_json" && mv "$tmp_devices_json" "$devices_json"
-			# 这也是一次真实的重连（此前 up() 顶部已经确认设备当前不是 online 状态），
-			# 同样要清掉流量异常检测的历史快照，原因同下面"全新设备"分支
-			[ -f "${dir}/client_usage_history" ] && {
-				awk -v mac="$mac" '$2!=mac' "${dir}/client_usage_history" >"${dir}/client_usage_history.tmp" 2>/dev/null && mv "${dir}/client_usage_history.tmp" "${dir}/client_usage_history"
-			}
 		# up
 		else
 			# 剔除（重置）流量数据
 			usage down ${ip}
-			# 同时清掉这台设备在流量异常检测历史快照里的记录：如果不清，下次
-			# get_client_usage() 检查时可能会找到"断线前"留下的旧快照当基准，
-			# 把跨越了本次连接开始之前的用量也算进来，导致"刚连接没多久就报异常流量"
-			[ -n "$mac" ] && [ "$mac" != "unknown" ] && [ -f "${dir}/client_usage_history" ] && {
-				awk -v mac="$mac" '$2!=mac' "${dir}/client_usage_history" >"${dir}/client_usage_history.tmp" 2>/dev/null && mv "${dir}/client_usage_history.tmp" "${dir}/client_usage_history"
-			}
+			# 注意：这里不清除流量异常检测的窗口累计状态。设备断线重连后，窗口内的累计继续算，窗口到期才重置（见 usage_track）
 			# 删除当前 IP 对应的键值，重新写入，否则要启用 unique_by(.ip) 去重
 			jq --arg ip "$ip" 'del(.devices[] | select(.ip == $ip))' "$devices_json" >"$tmp_devices_json" && mv "$tmp_devices_json" "$devices_json"
 			local name=$(getname "$ip" "$mac")
@@ -2583,29 +2573,61 @@ scan_due() {
 	return 0
 }
 
-# 窗口内的流量增量。基准 = "窗口起点"与"该方向上次触发重置时间"中较晚者之后的第一条快照；
-# 窗口内没有快照（设备刚上线、还没攒够窗口时长）时不输出，避免把连接前就存在的累计流量误判成爆量。
-# 参数: $1 MAC  $2 方向 up|down|total  $3 窗口(秒)  $4 当前累计值  $5 历史文件里的列号(3=总 4=下行 5=上行)
-# 依赖调用者(get_client_usage)里的局部变量 now / history_file / reset_file
-usage_delta() {
-	local mac="$1" d="$2" win="$3" cur="$4" col="$5" cutoff last_reset base base_ts delta
-	last_reset=$(awk -v m="$mac" -v d="$d" '$1==m && $2==d{t=$3} END{print t+0}' "$reset_file" 2>/dev/null)
-	last_reset=${last_reset:-0}
-	cutoff=$((now - win)); [ "$last_reset" -gt "$cutoff" ] && cutoff=$last_reset
-	# 只接受有效的基准行：总流量>0；方向列(4=下行/5=上行)不能是 -1(记录时后端没给方向数据)，
-	# 也不能出现"总流量>0 但上下行都是 0"(统计后端那一刻没读到方向数据)。
-	# 这类行如果当基准，delta 就等于设备的全部历史累计流量，会把整个累计量当成窗口内产生的而误报；
-	# 旧版本留在历史文件里的这类行也会在这里被忽略
-	base=$(awk -v mac="$mac" -v c="$cutoff" -v col="$col" '$2==mac && $1>=c && $3>0 && (col==3 || ($4>=0 && $5>=0 && ($4+$5)>0)) {print $col, $1; exit}' "$history_file" 2>/dev/null)
-	[ -z "$base" ] && return
-	read -r base base_ts <<<"$base"
-	delta=$((cur - base)); [ "$delta" -lt 0 ] && delta=0
-	# 输出: 增量  基准快照的时间戳（用来算"从开始计数到现在实际过了多久"）
-	echo "$delta $base_ts"
+# 固定窗口累计（每个 MAC + 方向各自独立）。
+# 状态文件每行: <mac> <方向 up|down|total> <窗口起点> <窗口内已累计> <参考累计值> <上次读数> <上次读数时间> <低于参考值的连续次数>
+# - 设备断线期间不会被清零：窗口内重连继续累计，窗口到期才重置
+# - 窗口到期时，先把最后一段增量算进旧窗口并交给调用者判断，再开新窗口；
+#   如果到期时设备已经很久没有读数（断线跨过了窗口结束），直接开新窗口、从 0 重新计算
+# - 累计值倒退（统计后端重启、同一 MAC 读到另一行较小的值）时，不把"回到原来的值"当成新增流量；
+#   连续 3 次都低于参考值，才认定计数器真的被清零，改用新的参考值（第一次掉到低值的那一段不计入，宁可少算一段也不误报）
+# - 两次读数之间的增量折算成速率，超过 client_usage_max_rate（MB/s，默认 500，0=关闭）时，
+#   视为统计后端读数跳变而不是真实流量：这一段增量不计入，并在输出里报告被忽略的字节数
+# 参数: $1 MAC  $2 方向 up|down|total  $3 窗口(秒)  $4 当前累计值
+# 输出: <窗口内累计增量> <窗口起点> <被忽略的字节数>
+# 依赖调用者(get_client_usage)里的局部变量 now / state_file / usage_interval
+usage_track() {
+	local mac="$1" d="$2" win="$3" cur="$4"
+	local cap=$(( ${client_usage_max_rate:-500} * 1048576 ))
+	local gap=$(( ${usage_interval:-300} * 3 + 120 ))
+	local tmp="${state_file}.tmp"
+	[ -f "$state_file" ] || : >"$state_file"
+	awk -v mac="$mac" -v d="$d" -v win="$win" -v cur="$cur" -v now="$now" -v cap="$cap" -v gap="$gap" -v tmp="$tmp" '
+		$1==mac && $2==d { found=1; ws=$3+0; acc=$4+0; ref=$5+0; last=$6+0; lts=$7+0; low=$8+0; next }
+		{ print > tmp }
+		END {
+			cur+=0; now+=0; win+=0; cap+=0; gap+=0; skipped=0
+			if (!found || (now-ws >= win && now-lts > gap)) {
+				ws=now; acc=0; ref=cur; last=cur; lts=now; low=0; out_acc=0; out_ws=now
+			} else {
+				if (cur >= ref) { inc=cur-ref; ref=cur; low=0 }
+				else {
+					# 刚从参考值那一行掉到低值：分不清是计数器被清零还是读到了另一行，这一次不计入；
+					# 之后连续的低值读数，按它们之间的增长计入
+					if (last >= ref) inc=0
+					else inc=(cur >= last) ? cur-last : cur
+					low++
+					if (low >= 3) { ref=cur; low=0 }
+				}
+				dt=now-lts; if (dt < 1) dt=1
+				if (cap > 0 && inc > cap*dt) { skipped=inc; inc=0 }
+				acc+=inc; last=cur; lts=now
+				out_acc=acc; out_ws=ws
+				if (now-ws >= win) { ws=now; acc=0 }
+			}
+			printf "%s %s %.0f %.0f %.0f %.0f %.0f %d\n", mac, d, ws, acc, ref, last, lts, low > tmp
+			printf "%.0f %.0f %.0f\n", out_acc, out_ws, skipped
+		}' "$state_file" 2>/dev/null && mv "$tmp" "$state_file" 2>/dev/null
+}
+
+# 触发报警后，只重置该方向的窗口（重新开始累计），另一个方向继续
+usage_track_reset() {
+	local tmp="${state_file}.tmp"
+	[ -f "$state_file" ] || return
+	awk -v mac="$1" -v d="$2" -v now="$now" '$1==mac && $2==d {$3=now; $4=0} {print}' "$state_file" >"$tmp" 2>/dev/null && mv "$tmp" "$state_file"
 }
 
 # 设备异常流量检测
-# 上传、下载各有独立的"阈值 + 时间窗(分钟)"，任意一个方向超标就推送，并只重置超标的那个方向
+# 上传、下载各有独立的"阈值 + 时间窗(分钟)"，窗口是固定周期：断线不清零，窗内重连继续累计，窗口到期才重置；，任意一个方向超标就推送，并只重置超标的那个方向
 # （例如上传 500M/60 分钟、下载 2G/120 分钟）；推送内容里上传和下载都会显示。
 # 没有配置上传/下载阈值时，沿用旧的"总流量 client_usage_max / client_usage_window(小时)"逻辑，已有配置不受影响
 get_client_usage() {
@@ -2637,8 +2659,7 @@ get_client_usage() {
 	[ "$client_usage_disturb" -eq "1" ] && [ -n "$client_usage_whitelist" ] && local MACLIST=$(echo "$client_usage_whitelist")
 	[ -z "$MACLIST" ] && return
 
-	local history_file="${dir}/client_usage_history"
-	local reset_file="${dir}/client_usage_reset"   # 每行: <mac> <方向 up|down|total> <重置时间戳>
+	local state_file="${dir}/client_usage_state"   # 每个 MAC+方向 的窗口累计状态，格式见 usage_track
 	local now=$(date +%s)
 	local usage_title_set=""
 
@@ -2665,17 +2686,20 @@ get_client_usage() {
 				log_change "[WARN] $(translate "Traffic backend provides no upload/download split, per-direction alert skipped")"
 			fi
 
-			local d_up="" d_down="" d_total="" up_ts="" down_ts="" total_ts="" hit_up="" hit_down="" hit_total=""
+			local d_up="" d_down="" d_total="" up_ts="" down_ts="" total_ts="" up_skip="" down_skip="" total_skip="" hit_up="" hit_down="" hit_total=""
 			local dir_ok="0"
 			[ "$cur_has_direction" = "1" ] && [ $((cur_in + cur_out)) -gt 0 ] && dir_ok="1"
 			if [ "$dir_ok" = "1" ] && { [ -n "$up_max" ] || [ -n "$down_max" ]; }; then
-				read -r d_up up_ts <<<"$(usage_delta "$mac" up $((up_min * 60)) "$cur_out" 5)"
-				read -r d_down down_ts <<<"$(usage_delta "$mac" down $((down_min * 60)) "$cur_in" 4)"
+				read -r d_up up_ts up_skip <<<"$(usage_track "$mac" up $((up_min * 60)) "$cur_out")"
+				read -r d_down down_ts down_skip <<<"$(usage_track "$mac" down $((down_min * 60)) "$cur_in")"
+				[ "${up_skip:-0}" -gt 0 ] && log_change "[WARN] $(translate "Traffic reading of %s (%s) jumped by %s, ignored as a statistics backend glitch" "$mac" "up" "$(bytes_for_humans "$up_skip")")"
+				[ "${down_skip:-0}" -gt 0 ] && log_change "[WARN] $(translate "Traffic reading of %s (%s) jumped by %s, ignored as a statistics backend glitch" "$mac" "down" "$(bytes_for_humans "$down_skip")")"
 				[ -n "$up_max" ] && [ -n "$d_up" ] && [ "$d_up" -ge "$up_max" ] && hit_up="1"
 				[ -n "$down_max" ] && [ -n "$d_down" ] && [ "$d_down" -ge "$down_max" ] && hit_down="1"
 			fi
 			if [ -n "$total_max" ]; then
-				read -r d_total total_ts <<<"$(usage_delta "$mac" total $((total_hours * 3600)) "$cur_total" 3)"
+				read -r d_total total_ts total_skip <<<"$(usage_track "$mac" total $((total_hours * 3600)) "$cur_total")"
+				[ "${total_skip:-0}" -gt 0 ] && log_change "[WARN] $(translate "Traffic reading of %s (%s) jumped by %s, ignored as a statistics backend glitch" "$mac" "total" "$(bytes_for_humans "$total_skip")")"
 				[ -n "$d_total" ] && [ "$d_total" -ge "$total_max" ] && hit_total="1"
 			fi
 
@@ -2741,23 +2765,18 @@ ${detail}\
 ${str_linefeed}${str_tab} - $(translate "Uptime:")${str_space}${str_space}${str_space}${str_space}${time1}${detail_dbm}"
 
 				# 重置：只重置触发的方向，另一个方向的统计继续累计
-				[ -n "$hit_up" ] && echo "$mac up $now" >>"$reset_file"
-				[ -n "$hit_down" ] && echo "$mac down $now" >>"$reset_file"
-				[ -n "$hit_total" ] && echo "$mac total $now" >>"$reset_file"
+				[ -n "$hit_up" ] && usage_track_reset "$mac" up
+				[ -n "$hit_down" ] && usage_track_reset "$mac" down
+				[ -n "$hit_total" ] && usage_track_reset "$mac" total
 			fi
 
-			# 后端没给方向数据，或总流量>0 却读到上下行全 0 时，方向列记为 -1，不当作有效基准
-			if [ "$cur_has_direction" != "1" ] || { [ "$cur_total" -gt 0 ] && [ $((cur_in + cur_out)) -eq 0 ]; }; then
-				cur_in=-1; cur_out=-1
-			fi
-			echo "$now $mac $cur_total $cur_in $cur_out" >>"$history_file"
 		done
 
+		# 每 10 分钟清掉超过 2 天没有读数的状态行（设备已不在了）
 		if [ "$((now - ${client_usage_clean_time:-0}))" -ge 600 ]; then
-			[ -f "$history_file" ] && awk -v cutoff="$((now - 86400))" '$1>=cutoff' "$history_file" >"${history_file}.tmp" 2>/dev/null && mv "${history_file}.tmp" "$history_file"
+			[ -f "$state_file" ] && awk -v cutoff="$((now - 172800))" '$7>=cutoff' "$state_file" >"${state_file}.tmp" 2>/dev/null && mv "${state_file}.tmp" "$state_file"
 			client_usage_clean_time=$now
 		fi
-		[ -f "$reset_file" ] && awk '{k=$1" "$2; t[k]=$3} END{for(k in t) print k, t[k]}' "$reset_file" >"${reset_file}.tmp" 2>/dev/null && mv "${reset_file}.tmp" "$reset_file"
 		get_client_usage_time=$now
 	fi
 }
