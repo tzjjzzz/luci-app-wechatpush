@@ -300,7 +300,20 @@ return view.extend({
 	o = s.option(form.Value, 'client_usage_scan_interval', _('Abnormal traffic scan interval (s)'));
 	o.datatype = 'and(uinteger,min(30))';
 	o.placeholder = '300';
-	o.description = _('How often traffic is sampled and compared against the limits. A shorter interval makes the reported time (from start of counting to exceeding the limit) more precise, at the cost of a larger history file.');
+	o.description = _('How often traffic is sampled and compared against the limits. A shorter interval makes the reported time (from start of counting to exceeding the limit) more precise.');
+
+	o = s.option(form.Value, 'client_usage_fresh_time', _('New connection guard period (s)'));
+	o.datatype = 'uinteger';
+	o.placeholder = '300';
+	o.description = _('If an abnormal traffic alert fires within this many seconds after a device connects, and the traffic counted in the window is about equal to the total traffic of that device (within the tolerance below), it is treated as a statistics glitch and suppressed once per connection. If the heavy traffic is real, the next scan reports it. Set 0 to disable.');
+
+	o = s.option(form.Value, 'client_usage_fresh_tolerance', _('New connection guard tolerance'));
+	o.placeholder = '100M';
+	o.validate = function (section_id, value) {
+		if (value === '' || /^[0-9]+[KkMmGg]?$/.test(value)) return true;
+		return _('Enter a number optionally followed by K, M or G, e.g. 100M');
+	};
+	o.description = _('Maximum difference between the traffic counted in the window and the total traffic of the device for the alert to be suppressed. Append K / M / G, e.g. 100M.');
 
 	o = s.option(form.Value, 'wireguard_scan_interval', _('WireGuard scan interval (s)'));
 	o.datatype = 'uinteger';
@@ -382,26 +395,6 @@ return view.extend({
 		o.datatype = "uinteger"
 		o.description = _("Unit: hours")
 		o.depends('unattended_autoreboot_mode', '2');
-
-		o = s.option(form.Value, "font_title", _("Main title color"))
-		o.placeholder = '#6A65FF'
-		o.description = _('Fill in a #RRGGBB hex color code. Leave empty to use the default #6A65FF. Only takes effect where the push channel supports simple HTML rendering (e.g. WxPusher); other channels ignore the tags.')
-
-		o = s.option(form.Value, "font_success", _("Success message color"))
-		o.placeholder = '#92D050'
-		o.description = _('Fill in a #RRGGBB hex color code. Leave empty to use the default #92D050.')
-
-		o = s.option(form.Value, "font_fail", _("Failure message color"))
-		o.placeholder = '#FF6666'
-		o.description = _('Fill in a #RRGGBB hex color code. Leave empty to use the default #FF6666.')
-
-		o = s.option(form.Value, "font_client", _("Client name color"))
-		o.placeholder = '#92D050'
-		o.description = _('Fill in a #RRGGBB hex color code. Leave empty to use the default #92D050.')
-
-		o = s.option(form.Value, "font_module", _("Module title color"))
-		o.placeholder = '#76CCFF'
-		o.description = _('Fill in a #RRGGBB hex color code. Leave empty to use the default #76CCFF. Applies to titles like the online-devices list and system status.')
 
 		return m.render();
 	}
