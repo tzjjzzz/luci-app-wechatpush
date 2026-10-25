@@ -247,6 +247,11 @@ return view.extend({
 				display: none; /* 隐藏元素 */
 			}
 
+			/* 连接点在桌面端有独立的列，接口列里的这一行只给手机端用 */
+			.device-table .iface-parent {
+				display: none;
+			}
+
 			@media (max-width: 767px) {
 				.device-table {
 					width: 100%; /* 表格宽度占满父容器 */
@@ -272,16 +277,31 @@ return view.extend({
 				.device-table td[data-column="parent"] {
 					display: none;
 				}
-				/* 隐藏接口列的文本部分 */
-				.device-table td[data-column="interface"] span:not(.iface-icon) {
-					display: none;
+				/* 手机端：连接点列单独隐藏，改为显示在接口列里（接口名下一行） */
+				.device-table td[data-column="interface"] {
+					line-height: 1.25;
 				}
-				/* 调整图标样式 */
 				.device-table td[data-column="interface"] .iface-icon {
-					margin-right: 0; /* 去掉图标右侧的间距 */
+					margin-right: 2px;
+				}
+				.device-table td[data-column="interface"] .iface-parent {
+					display: block;
+					font-size: 11px;
+					opacity: 0.75;
+					word-break: break-all;
 				}
 			}
 		`;
+
+		// 连接点（上级设备）的显示名：优先用在线设备里同 MAC / IP 的设备名，找不到就显示原值
+		function getParentName(device) {
+			if (!device['parent']) return '';
+			var parentMac = (device['parent'] || '').toUpperCase();
+			var parentDevice = devices.find(d => {
+				return (d.mac || '').toUpperCase() === parentMac || d.ip === device['parent'];
+			});
+			return parentDevice ? (parentDevice.name || parentDevice.ip) : device['parent'];
+		}
 
 		function createTable() {
 			var table = document.createElement('table');
@@ -341,22 +361,17 @@ return view.extend({
 
 							cell.appendChild(icon);
 							cell.appendChild(text);
-						} else if (columns[i] === 'parent') {
-							if (device['parent']) {
-								var parentDevice = devices.find(d => {
-									// 统一转换为大写比较
-									var deviceMac = (d.mac || '').toUpperCase();
-									var parentMac = (device['parent'] || '').toUpperCase();
-									return deviceMac === parentMac || d.ip === device['parent'];
-								});
-								if (parentDevice) {
-									cell.textContent = parentDevice.name || parentDevice.ip;
-								} else {
-									cell.textContent = device['parent'];
-								}
-							} else {
-								cell.textContent = '';
+
+							// 手机端把连接点放在接口名下面
+							var parentName = getParentName(device);
+							if (parentName) {
+								var sub = document.createElement('span');
+								sub.classList.add('iface-parent');
+								sub.textContent = '↳ ' + parentName;
+								cell.appendChild(sub);
 							}
+						} else if (columns[i] === 'parent') {
+							cell.textContent = getParentName(device);
 						} else {
 							cell.textContent = device[columns[i]];
 						}

@@ -397,6 +397,11 @@ main() {
 		deltemp
 		usage update
 
+		# MAC 数据库缺失（比如开机时网络还没通、下载失败）时，每 30 分钟自动重试一次
+		if [ -n "$oui_data" ] && { [ "$oui_data" = "1" ] || [ "$oui_data" = "2" ]; } && [ ! -s "$oui_base" ] && scan_due oui_retry 1800; then
+			/usr/libexec/wechatpush-call "down_oui"
+		fi
+
 		# 网络状态与 IP 变动
 		if { [ "$get_ipv4_mode" -ne "0" ] || [ "$get_ipv6_mode" -ne "0" ]; } && scan_due net "$net_scan_interval"; then
 			check_connect
@@ -477,10 +482,27 @@ silent_run() {
 	"$@" >/dev/null 2>&1
 }
 
+# 清理设备名。设备名来自局域网里不可信的来源（设备自己通告的主机名、NetBIOS、下载的数据库、其它路由器的列表），
+# 可能被恶意设备构造成超长字符串，或带 HTML 标签 / Markdown 链接 / 命令替换的内容，而名字最终会写进推送消息。
+# 这里去掉控制字符、双向文本控制符和零宽字符，ASCII 只保留字母数字、空格、连字符、点和下划线，
+# 非 ASCII 字符（中文等）保留，并先把长度截到 128 字节，避免超长输入拖慢后面逐字符的宽度计算。
+sanitize_name() {
+	printf '%s' "$1" | head -c 128 | tr -d '\000-\037\177' | LC_ALL=C sed \
+		-e "s/$(printf '\342\200')[$(printf '\213-\217\252-\256')]//g" \
+		-e "s/$(printf '\342\201')[$(printf '\246-\251')]//g" \
+		-e "s/$(printf '\357\273\277')//g" \
+		-e 's/[][<>&"'"'"'`$\\;|(){}*?~#%!^=+@:,\/]//g'
+}
+
 # 处理并检查 tmp_name 的通用函数
+# $2: 最大显示宽度（可选）  $3: name = 按设备名清理（不可信来源）；alias = 用户自己写的备注，只做长度和控制字符限制
 process_and_check() {
 	[ -z "$1" ] && return 1
-	local value=$(echo "$1" | tr -d '\n\r' | awk '$1=$1' | sed 's/_/ /g' | grep -v "^$" | sort -u | head -n1)
+	local value=$(echo "$1" | head -c 4096 | tr -d '\n\r' | awk '$1=$1' | sed 's/_/ /g' | grep -v "^$" | sort -u | head -n1)
+	case "$3" in
+		name) value=$(sanitize_name "$value" | awk '$1=$1') ;;
+		alias) value=$(printf '%s' "$value" | head -c 128 | tr -d '\000-\037\177') ;;
+	esac
 	[ "$value" == "unknown" ] && value=""
 	[ -n "$value" ] && [ -n "$2" ] && echo "$(cut_str "$value" "$2")" && return 0
 	[ -n "$value" ] && echo "$value" && return 0
@@ -810,45 +832,47 @@ getname() {
 
 	# 自定义备注
 	tmp_name=$(cat "$device_aliases_path" 2>/dev/null | grep -i -Ew "^${ip}|^${mac}" | awk '{for(i=2; i<=NF; i++) printf $i " "; print ""}')
-	process_and_check "$tmp_name" "$name_width" && return
+	process_and_check "$tmp_name" "$name_width" "alias" && return
 
 	# 光猫
 	[ -f "${dir}/gateway_info" ] && {
 		tmp_name=$(jq -r --arg ip "$ip" '.[] | select(.ip == $ip) | .name' "${dir}/gateway_info")
-		process_and_check "$tmp_name" "$name_width" && return
+		process_and_check "$tmp_name" "$name_width" "name" && return
 	}
 
 	# MikroTik
 	[ -f "${dir}/mikrotik_info" ] && {
 		tmp_name=$(jq -r --arg mac "$mac" '.[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase)) | .name' "${dir}/mikrotik_info")
-		process_and_check "$tmp_name" "$name_width" && return
+		process_and_check "$tmp_name" "$name_width" "name" && return
 	}
 
 	# MIWiFi
 	[ -f "${dir}/miwifi_info" ] && {
 		tmp_name=$(jq -r --arg ip "$ip" '.[] | select(.ip == $ip) | .name' "${dir}/miwifi_info")
-		process_and_check "$tmp_name" "$name_width" && return
+		process_and_check "$tmp_name" "$name_width" "name" && return
 	}
 
 	# openwrt
 	[ -f "${dir}/openwrt_info" ] && {
 		tmp_name=$(jq -r --arg mac "$mac" '.[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase)) | .name' "${dir}/openwrt_info")
-		process_and_check "$tmp_name" "$name_width" && return
+		process_and_check "$tmp_name" "$name_width" "name" && return
 	}
 
-	# 已保存的主机名
-	tmp_name=$(jq -r --arg ip "$ip" --arg mac "$mac" '.devices[] | select(.ip == $ip and (.mac | ascii_downcase) == ($mac | ascii_downcase)) | .name' "$devices_json")
-	[ -n "$oui_name" ] && [ -n "$tmp_name" ] && [ "$oui_name" == "$tmp_name" ] && tmp_name=""
-	process_and_check "$tmp_name" "$name_width" && return
-
 	# 静态地址备注名
+	tmp_name=""
 	local dhcp_config=$(uci show dhcp | grep -i -w "${ip}\|${mac}" | sed -n 's/\(dhcp\..*\)\..*/\1/p')
 	[ -n "$dhcp_config" ] && tmp_name=$(uci get ${dhcp_config}.name)
-	process_and_check "$tmp_name" "$name_width" && return
+	process_and_check "$tmp_name" "$name_width" "name" && return
 
-	# DHCP
-	[ -f "/tmp/dhcp.leases" ] && tmp_name=$(grep -w "${ip}" /tmp/dhcp.leases | awk '{print $4}')
-	process_and_check "$tmp_name" "$name_width" && return
+	# DHCP 租约里设备自己通告的主机名（没有通告时租约里是 *）
+	tmp_name=""
+	[ -f "/tmp/dhcp.leases" ] && tmp_name=$(awk -v ip="$ip" '$3==ip {print $4}' /tmp/dhcp.leases | head -n1)
+	[ "$tmp_name" == "*" ] && tmp_name=""
+	process_and_check "$tmp_name" "$name_width" "name" && return
+
+	# 已保存的主机名（只在设备自己没有通告名字时才用：它可能是以前从数据库查到的厂商名）
+	tmp_name=$(jq -r --arg ip "$ip" --arg mac "$mac" '.devices[] | select(.ip == $ip and (.mac | ascii_downcase) == ($mac | ascii_downcase)) | .name' "$devices_json")
+	process_and_check "$tmp_name" "$name_width" "name" && return
 
 	# 定时推送时不查询
 	[ -f "${dir}/send_pid" ] && echo "unknown" && return
@@ -856,19 +880,27 @@ getname() {
 	# MAC 获取失败时返回 unknown，优先级不能最高，自定义备注可以被 IP 匹配
 	echo "$mac" | grep -q -w "unknown\|*" && echo "unknown" && return
 
-	# 因 NetBIOS 查询时间过长，跳过离线设备
-	# 设备刚上线时设备信息未保存，json 中无法检查在线状态，应避免使用 oui 数据库，否则无法使用 NetBIOS 查询
-	# 离线、在线时间超过 10 分钟不查询
+	# 因 NetBIOS 查询时间过长，只在设备刚上线的 10 分钟内查询
+	# 设备刚上线时设备信息未保存，json 中无法检查在线状态，这一次不查询（避免先用 oui 数据库的名字挡住 NetBIOS），下一轮再查
 	local uptime=$(jq -r --arg ip "$ip" '.devices[] | select(.ip == $ip and .status == "online") | .uptime' "$devices_json")
-	if [ -n "$uptime" ] && time_up=$(expr $(date +%s) - $uptime) && [ "$time_up" -lt 600 ]; then
-		tmp_name=$(nmblookup_timeout "${ip}" "name" "5" 2>/dev/null)
-		process_and_check "$tmp_name" "$name_width" && return
+	if [ -n "$uptime" ]; then
+		local time_up=$(expr $(date +%s) - $uptime)
+		if [ "$time_up" -lt 600 ]; then
+			tmp_name=$(nmblookup_timeout "${ip}" "name" "5" 2>/dev/null)
+			process_and_check "$tmp_name" "$name_width" "name" && return
+		fi
 
-		# MAC 设备信息数据库
-		[ -f "$oui_base" ] && oui_name=$(grep -i "$(echo "$mac" | cut -c 1,2,4,5,7,8)" "$oui_base" | sed -nr 's#^.*16)..(.*)#\1#gp')
-		[ -n "$oui_data" ] && [ "$oui_data" -eq "4" ] && oui_name=$(curl -sS "https://standards-oui.ieee.org/oui/oui.txt" | grep -i "$(echo "$mac" | cut -c 1,2,4,5,7,8)" | sed -nr 's#^.*16)..(.*)#\1#gp')
+		# MAC 设备信息数据库：只是查本地文件，很快，所以不再限制 10 分钟
+		# （以前上线超过 10 分钟还没查到名字的设备，之后再也不会查数据库，就一直是 unknown）
+		local oui_prefix=$(echo "$mac" | cut -c 1,2,4,5,7,8)
+		if [ -s "$oui_base" ]; then
+			oui_name=$(grep -i -m1 "^${oui_prefix}" "$oui_base" | sed -nr 's#^.*16\)..(.*)#\1#gp')
+		# 在线查询选项（3）每次都要下载整份数据库，只在刚上线的 10 分钟内做
+		elif [ -n "$oui_data" ] && [ "$oui_data" -eq "3" ] && [ "$time_up" -lt 600 ]; then
+			oui_name=$(curl -sS --connect-timeout 8 -m 20 "https://standards-oui.ieee.org/oui/oui.txt" | grep -i -m1 "^${oui_prefix}.*(base 16)" | sed -nr 's#^.*16\)..(.*)#\1#gp')
+		fi
 		tmp_name="$oui_name"
-		process_and_check "$tmp_name" "$name_width" && return
+		process_and_check "$tmp_name" "$name_width" "name" && return
 	fi
 
 	echo "unknown"
