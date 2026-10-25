@@ -38,6 +38,15 @@
 			"path": "wechatpush/client"
 		}
 	},
+	"admin/services/wechatpush/theme": {
+		"title": "Theme Settings",
+		"order": 35,
+		"action": {
+			"type": "view",
+			"path": "wechatpush/theme"
+		}
+	},
+
 	"admin/services/wechatpush/log": {
 		"title": "Log",
 		"order": 40,
