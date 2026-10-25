@@ -33,13 +33,13 @@ file_date() {
 download_file() {
 	url=$1
 	output_file=$2
-	retries=2
+	retries=${3:-2}
 	retval=1
 
 	# 尝试使用 curl 下载
 	i=0
 	while [ $i -lt $retries ]; do
-		curl -fsSL --connect-timeout 15 --max-time 30 -o "${output_file}" "${url}" >/dev/null 2>&1
+		curl -fsSL --connect-timeout 15 --max-time 60 -o "${output_file}" "${url}" >/dev/null 2>&1
 		retval=$?
 		if [ $retval -eq 0 ]; then
 			return 0
@@ -63,21 +63,65 @@ download_file() {
 	return $retval
 }
 
+# MAC 信息数据源，按顺序尝试，哪个先成功用哪个。格式 "类型|地址"
+#   nmap: Nmap 的 nmap-mac-prefixes（约 1.3MB，条目数与 IEEE 基本一致），走 jsDelivr / GitHub
+#   ieee: IEEE 官方 oui.txt（几 MB，国内直连经常很慢甚至超时），放最后兜底
+oui_sources="nmap|https://cdn.jsdelivr.net/gh/nmap/nmap@master/nmap-mac-prefixes nmap|https://raw.githubusercontent.com/nmap/nmap/master/nmap-mac-prefixes ieee|${oui_url}"
+
+# 把不同来源统一转换成 "XXXXXX     (base 16)<TAB><TAB>厂商名"，后面的筛选和查询都按这个格式
+# 参数: $1 类型  $2 输入文件  $3 输出文件
+oui_normalize() {
+	case "$1" in
+		nmap) awk 'length($1)==6 && $1 ~ /^[0-9A-Fa-f]+$/ { n=$0; sub(/^[^ \t]+[ \t]+/, "", n); printf "%s     (base 16)\t\t%s\n", toupper($1), n }' "$2" >"$3" ;;
+		*) grep -i "(base 16)" "$2" >"$3" ;;
+	esac
+}
+
 # 更新 MAC 信息文件
+# 下载、转换、校验都通过之后才替换旧库；任何一步失败都保留旧库，不会把库覆盖成空文件
 down_oui() {
-	if [ -n "${oui_data}" ] && [ "${oui_data}" -ne "3" ]; then
-		echo "$(date "+%Y-%m-%d %H:%M:%S") [INFO] $(translate "Starting background update of MAC information file")" >>"${logfile}"
-		download_file "${oui_url}" "${dir}/oui.txt"
-		local RETVAL=$?
-		[ ${RETVAL} -ne 0 ] && echo "$(date "+%Y-%m-%d %H:%M:%S") [ERROR] $(translate "Failed to download MAC information file, return code: ${RETVAL}")" >>"${logfile}" && return 1
-		echo "$(date "+%Y-%m-%d %H:%M:%S") [INFO] $(translate "MAC information file downloaded successfully, processing...")" >>"${logfile}"
-		if [ "${oui_data}" -eq "1" ]; then
-			grep -i -E ".*(base 16).*(apple|aruba|asus|autelan|belkin|bhu|buffalo|cctf|cisco|comba|datang|dell|dlink|dowell|ericsson|fast|feixun|fiberhome|fujitsu|grentech|h3c|hisense|hiwifi|honghai|honghao|hp|htc|huawei|intel|jinli|jse|lenovo|lg|liteon|malata|meizu|mercury|meru|moto|netcore|netgear|nokia|omron|oneplus|oppo|philips|router_unkown|samsung|shanzhai|sony|start_net|sunyuanda|tcl|tenda|texas|tianyu|tp-link|ubq|undefine|VMware|utstarcom|volans|xerox|xiaomi|zdc|zhongxing|smartisan).*" "${dir}/oui.txt" | sed -E 's/( Electronic| Technology| Intelligence| TECHNOLOGIES| Device| Systems| TELECOMMUNICATIONS| Instruments| Electronics| Corporation| Telecommunication| Communications| Electrical| Technology| Corporate| Intelligent| Interactive| MOBILE| Solutions| Mobility| Meraki| ELECTRO| VISUAL| Limited| International| Information| LLC|Co$|Co\.|Ltd\.$|Inc\.|B\.V\.$|AB$|,).*$/ /I; s/[[:space:]]*$//; s/ +$//' >"${oui_base}"
-		elif [ "${oui_data}" -eq "2" ]; then
-			grep -i "(base 16)" "${dir}/oui.txt" | sed -E 's/( Electronic| Technology| Intelligence| TECHNOLOGIES| Device| Systems| TELECOMMUNICATIONS| Instruments| Electronics| Corporation| Telecommunication| Communications| Electrical| Technology| Corporate| Intelligent| Interactive| MOBILE| Solutions| Mobility| Meraki| ELECTRO| VISUAL| Limited| International| Information| LLC|Co$|Co\.|Ltd\.$|Inc\.|B\.V\.$|AB$|,).*$/ /I; s/[[:space:]]*$//; s/ +$//' >"${oui_base}"
+	[ -n "${oui_data}" ] && [ "${oui_data}" -ne "3" ] || return 0
+	local lock="${dir}/oui_down.lock" std="${dir}/oui.std" ok=0 src type url
+	# 已有下载在进行(10 分钟内)就不重复启动
+	[ -f "$lock" ] && [ $(file_date "$lock") -lt 600 ] && return 0
+	echo $$ >"$lock"
+	echo "$(date "+%Y-%m-%d %H:%M:%S") [INFO] $(translate "Starting background update of MAC information file")" >>"${logfile}"
+	for src in $oui_sources; do
+		type="${src%%|*}"; url="${src#*|}"
+		rm -f "${dir}/oui.txt" "$std"
+		if ! download_file "$url" "${dir}/oui.txt" 1; then
+			echo "$(date "+%Y-%m-%d %H:%M:%S") [WARN] $(translate "MAC information file source failed, trying the next one")" >>"${logfile}"
+			continue
 		fi
-		rm -f "${dir}/oui.txt" >/dev/null 2>&1
+		oui_normalize "$type" "${dir}/oui.txt" "$std"
+		# 完整的库有三万多条，明显偏少说明下载到的是残缺文件或错误页面
+		if [ "$(grep -c "" "$std" 2>/dev/null || echo 0)" -ge 20000 ]; then
+			ok=1
+			break
+		fi
+		echo "$(date "+%Y-%m-%d %H:%M:%S") [WARN] $(translate "MAC information file looks incomplete, trying the next source")" >>"${logfile}"
+	done
+	rm -f "${dir}/oui.txt"
+	if [ "$ok" -ne 1 ]; then
+		echo "$(date "+%Y-%m-%d %H:%M:%S") [ERROR] $(translate "Failed to download MAC information file from all sources, keeping the existing database")" >>"${logfile}"
+		rm -f "$std" "$lock"
+		return 1
+	fi
+	echo "$(date "+%Y-%m-%d %H:%M:%S") [INFO] $(translate "MAC information file downloaded successfully, processing...")" >>"${logfile}"
+	rm -f "${oui_base}.new"
+	if [ "${oui_data}" -eq "1" ]; then
+			grep -i -E ".*(base 16).*(apple|aruba|asus|autelan|belkin|bhu|buffalo|cctf|cisco|comba|datang|dell|dlink|dowell|ericsson|fast|feixun|fiberhome|fujitsu|grentech|h3c|hisense|hiwifi|honghai|honghao|hp|htc|huawei|intel|jinli|jse|lenovo|lg|liteon|malata|meizu|mercury|meru|moto|netcore|netgear|nokia|omron|oneplus|oppo|philips|router_unkown|samsung|shanzhai|sony|start_net|sunyuanda|tcl|tenda|texas|tianyu|tp-link|ubq|undefine|VMware|utstarcom|volans|xerox|xiaomi|zdc|zhongxing|smartisan).*" "$std" | sed -E 's/( Electronic| Technology| Intelligence| TECHNOLOGIES| Device| Systems| TELECOMMUNICATIONS| Instruments| Electronics| Corporation| Telecommunication| Communications| Electrical| Technology| Corporate| Intelligent| Interactive| MOBILE| Solutions| Mobility| Meraki| ELECTRO| VISUAL| Limited| International| Information| LLC|Co$|Co\.|Ltd\.$|Inc\.|B\.V\.$|AB$|,).*$/ /I; s/[[:space:]]*$//; s/ +$//' >"${oui_base}.new"
+	elif [ "${oui_data}" -eq "2" ]; then
+			grep -i "(base 16)" "$std" | sed -E 's/( Electronic| Technology| Intelligence| TECHNOLOGIES| Device| Systems| TELECOMMUNICATIONS| Instruments| Electronics| Corporation| Telecommunication| Communications| Electrical| Technology| Corporate| Intelligent| Interactive| MOBILE| Solutions| Mobility| Meraki| ELECTRO| VISUAL| Limited| International| Information| LLC|Co$|Co\.|Ltd\.$|Inc\.|B\.V\.$|AB$|,).*$/ /I; s/[[:space:]]*$//; s/ +$//' >"${oui_base}.new"
+	fi
+	rm -f "$std" "$lock"
+	if [ -s "${oui_base}.new" ]; then
+		mv "${oui_base}.new" "${oui_base}"
 		echo "$(date "+%Y-%m-%d %H:%M:%S") [INFO] $(translate "MAC information file processing completed")" >>"${logfile}"
+	else
+		rm -f "${oui_base}.new"
+		echo "$(date "+%Y-%m-%d %H:%M:%S") [ERROR] $(translate "MAC information file looks incomplete, keeping the existing database")" >>"${logfile}"
+		return 1
 	fi
 }
 
@@ -86,7 +130,7 @@ if [ "$1" == "clear_log" ]; then
 	>"${logfile}"
 elif [ "$1" == "down_oui" ]; then
 	# 更新 MAC 信息列表
-	[ $(file_date "$oui_base") -lt 604800 ] && echo "$(date "+%Y-%m-%d %H:%M:%S") [INFO] $(translate "MAC information file does not need updating")" >>"${logfile}" && exit 2
+	[ -s "$oui_base" ] && [ $(file_date "$oui_base") -lt 604800 ] && echo "$(date "+%Y-%m-%d %H:%M:%S") [INFO] $(translate "MAC information file does not need updating")" >>"${logfile}" && exit 2
 	down_oui >/dev/null 2>&1 &
 elif [ "$1" == "child" ]; then
 	shift

@@ -1794,6 +1794,18 @@ msgstr "设备 MAC 信息文件下载成功，处理中"
 msgid "MAC information file processing completed"
 msgstr "设备 MAC 信息文件处理完成"
 
+msgid "MAC information file source failed, trying the next one"
+msgstr "MAC 信息文件下载失败，尝试下一个数据源"
+
+msgid "MAC information file looks incomplete, trying the next source"
+msgstr "MAC 信息文件内容不完整，尝试下一个数据源"
+
+msgid "Failed to download MAC information file from all sources, keeping the existing database"
+msgstr "所有数据源都下载失败，已保留现有的 MAC 信息库"
+
+msgid "MAC information file looks incomplete, keeping the existing database"
+msgstr "处理后的 MAC 信息文件内容不完整，已保留现有的 MAC 信息库"
+
 msgid "MAC information file does not need updating"
 msgstr "MAC 信息文件无需更新"
 
