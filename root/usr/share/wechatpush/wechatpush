@@ -564,8 +564,8 @@ title_compose() {
 		local kind=$(awk '{print $1; exit}' "$f")
 		local rest=$(awk '{ sub(/^[^ ]+ [^ ]+ ?/, ""); print; exit }' "$f")
 		case "$kind" in
-			online) translate "%s connected to %s" "$rest" "$device_name" | squeeze ;;
-			offline) translate "%s disconnected from %s" "$rest" "$device_name" | squeeze ;;
+			online) named "$(translate "%s connects" "$rest")" ;;
+			offline) named "$(translate "%s disconnects" "$rest")" ;;
 			*) echo "$rest" ;;
 		esac
 		return
@@ -2238,13 +2238,13 @@ wireguard_send() {
 
 	local wg_title wg_content_info
 	if [ "$event" = "connected" ]; then
-		wg_title=$(translate "%s connected to %s WireGuard" "$peer_label" "$device_name" | squeeze)
+		wg_title=$(named "$(translate "%s connected to WireGuard" "$peer_label")")
 		wg_content_info="${str_splitline}${str_title_start}${font_success_start}$(translate "WireGuard Peer Connected")${font_success_end}${str_title_end}"
 	elif [ "$event" = "endpoint_changed" ]; then
 		wg_title=$(translate "%s %s WireGuard endpoint changed" "$device_name" "$peer_label" | squeeze)
 		wg_content_info="${str_splitline}${str_title_start}${font_fail_start}$(translate "WireGuard Peer Endpoint Changed")${font_fail_end}${str_title_end}"
 	else
-		wg_title=$(translate "%s disconnected from %s WireGuard" "$peer_label" "$device_name" | squeeze)
+		wg_title=$(named "$(translate "%s disconnected from WireGuard" "$peer_label")")
 		wg_content_info="${str_splitline}${str_title_start}${font_fail_start}$(translate "WireGuard Peer Disconnected")${font_fail_end}${str_title_end}"
 	fi
 
@@ -2746,35 +2746,32 @@ usage_fresh_suppress() {
 	return 0
 }
 
-# 流量报警标题（单台设备）：路由器名称融合进句子，没设置名称就省略；两个方向窗口相同时窗口只写一次
-# 依赖调用者(get_client_usage)里的局部变量: ip_name hit_up hit_down hit_total up_el down_el total_el up_min down_min up_max down_max total_max
-usage_title_single() {
-	local u=$(bytes_short "$up_max") d=$(bytes_short "$down_max") t=$(bytes_short "$total_max") r="$device_name"
-	if [ -n "$hit_total" ]; then
-		if [ -n "$r" ]; then translate "%s on %s: within %s min traffic over %s" "$ip_name" "$r" "$total_el" "$t"
-		else translate "%s: within %s min traffic over %s" "$ip_name" "$total_el" "$t"; fi
-	elif [ -n "$hit_up" ] && [ -n "$hit_down" ] && [ "$up_min" = "$down_min" ]; then
-		if [ -n "$r" ]; then translate "%s on %s: within %s min uploaded over %s, downloaded over %s" "$ip_name" "$r" "$up_el" "$u" "$d"
-		else translate "%s: within %s min uploaded over %s, downloaded over %s" "$ip_name" "$up_el" "$u" "$d"; fi
-	elif [ -n "$hit_up" ] && [ -n "$hit_down" ]; then
-		if [ -n "$r" ]; then translate "%s on %s: within %s min uploaded over %s, within %s min downloaded over %s" "$ip_name" "$r" "$up_el" "$u" "$down_el" "$d"
-		else translate "%s: within %s min uploaded over %s, within %s min downloaded over %s" "$ip_name" "$up_el" "$u" "$down_el" "$d"; fi
-	elif [ -n "$hit_up" ]; then
-		if [ -n "$r" ]; then translate "%s on %s: within %s min uploaded over %s" "$ip_name" "$r" "$up_el" "$u"
-		else translate "%s: within %s min uploaded over %s" "$ip_name" "$up_el" "$u"; fi
-	else
-		if [ -n "$r" ]; then translate "%s on %s: within %s min downloaded over %s" "$ip_name" "$r" "$down_el" "$d"
-		else translate "%s: within %s min downloaded over %s" "$ip_name" "$down_el" "$d"; fi
-	fi
+# 窗口时间的简写：5 -> 5m，90 -> 1.5h，120 -> 2h
+time_short() {
+	awk -v m="$1" 'BEGIN { if (m < 60) printf "%dm", m; else { s = sprintf("%.1f", m / 60); sub(/\.0$/, "", s); printf "%sh", s } }'
 }
 
-# 多台设备同时报警时，每台设备的标题片段（路由器名称只在整个标题最前面写一次，所以这里不带窗口和名称）
-usage_title_frag() {
-	local u=$(bytes_short "$up_max") d=$(bytes_short "$down_max") t=$(bytes_short "$total_max")
-	if [ -n "$hit_total" ]; then translate "%s traffic over %s" "$ip_name" "$t"
-	elif [ -n "$hit_up" ] && [ -n "$hit_down" ]; then translate "%s uploaded over %s, downloaded over %s" "$ip_name" "$u" "$d"
-	elif [ -n "$hit_up" ]; then translate "%s uploaded over %s" "$ip_name" "$u"
-	else translate "%s downloaded over %s" "$ip_name" "$d"
+# 流量报警标题里这台设备的部分：时间 + 方向 + 超出多少（实际值 - 阈值），例如 1m上传1.73G 下载44.55G
+# 两个方向窗口相同时时间只写一次；只配了总流量时写成 "1h 0.3G"（没有方向字，中间留一个空格免得和数字连在一起）
+# 依赖调用者(get_client_usage)里的局部变量: hit_up hit_down hit_total up_el down_el total_el up_min down_min up_max down_max total_max d_up d_down d_total
+usage_title_body() {
+	local eu=0 ed=0 et=0
+	if [ -n "$hit_total" ]; then
+		et=$(( ${d_total:-0} - ${total_max:-0} )); [ "$et" -lt 0 ] && et=0
+		echo "$(time_short "$total_el") $(bytes_short "$et")"
+		return
+	fi
+	[ -n "$hit_up" ] && eu=$(( ${d_up:-0} - ${up_max:-0} )) && [ "$eu" -lt 0 ] && eu=0
+	[ -n "$hit_down" ] && ed=$(( ${d_down:-0} - ${down_max:-0} )) && [ "$ed" -lt 0 ] && ed=0
+	local tu=$(time_short "$up_el") td=$(time_short "$down_el")
+	if [ -n "$hit_up" ] && [ -n "$hit_down" ] && [ "$up_min" = "$down_min" ]; then
+		translate "%s up %s down %s" "$tu" "$(bytes_short "$eu")" "$(bytes_short "$ed")"
+	elif [ -n "$hit_up" ] && [ -n "$hit_down" ]; then
+		echo "$(translate "%s up %s" "$tu" "$(bytes_short "$eu")") $(translate "%s down %s" "$td" "$(bytes_short "$ed")")"
+	elif [ -n "$hit_up" ]; then
+		translate "%s up %s" "$tu" "$(bytes_short "$eu")"
+	else
+		translate "%s down %s" "$td" "$(bytes_short "$ed")"
 	fi
 }
 
@@ -2814,7 +2811,7 @@ get_client_usage() {
 	local state_file="${dir}/client_usage_state"   # 每个 MAC+方向 的窗口累计状态，格式见 usage_track
 	local now=$(date +%s)
 	local usage_blocks="" usage_n=0
-	local -a usage_singles=() usage_frags=()
+	local -a usage_frags=()
 
 	# 每 5 分钟记录一次快照并检查一次
 	# 快照/检查间隔（秒）：高级设置里可调，默认 300；最小 30（主循环本身每 sleeptime 秒才醒一次）
@@ -2880,8 +2877,7 @@ get_client_usage() {
 				local time1=$(time_for_humans $(expr $(date +%s) - ${time_up}))
 
 				# 标题：本台设备的单独标题和多台合并时用的片段；最终标题在循环结束后统一生成
-				usage_singles+=("$(usage_title_single)")
-				usage_frags+=("$(usage_title_frag)")
+				usage_frags+=("${ip_name} $(usage_title_body)")
 				usage_n=$((usage_n + 1))
 				local content_title="${str_splitline}${str_title_start}${font_fail_start}$(translate "Device abnormal traffic")${font_fail_end}${str_title_end}"
 
@@ -2921,13 +2917,10 @@ ${str_linefeed}${str_tab} - $(translate "Uptime:")${str_space}${str_space}${str_
 
 		# 流量报警放在最上面：标题也让它领头（同一轮有设备连接/断开时合并成"设备状态变化（…）"）
 		if [ "$usage_n" -gt 0 ]; then
-			local usage_text="${usage_singles[0]}"
-			if [ "$usage_n" -gt 1 ]; then
-				local usage_sep="$(translate "; ")" usage_joined="" usage_frag
-				for usage_frag in "${usage_frags[@]}"; do usage_joined="${usage_joined:+${usage_joined}${usage_sep}}${usage_frag}"; done
-				usage_text="$usage_joined"
-				[ -n "$device_name" ] && usage_text="$(translate "%s: %s" "$device_name" "$usage_joined")"
-			fi
+			# 多台设备同时超标：用 "；" 隔开，路由器名称只在最前面写一次
+			local usage_sep="$(translate "; ")" usage_joined="" usage_frag
+			for usage_frag in "${usage_frags[@]}"; do usage_joined="${usage_joined:+${usage_joined}${usage_sep}}${usage_frag}"; done
+			local usage_text=$(named "$usage_joined")
 			title_event usage "$usage_text" "$usage_n"
 			title=$(title_compose)
 			content="${usage_blocks}${content}"
@@ -3301,10 +3294,10 @@ fail2ban_send() {
 
 	local f2b_title f2b_content_info
 	if [ "$event" = "ban" ]; then
-		f2b_title="${device_name:+${device_name}:}$(translate "fail2ban banned %s (%s)" "$ip" "$jail")"
+		f2b_title=$(named "$(translate "fail2ban banned %s (%s)" "$ip" "$jail")")
 		f2b_content_info="${str_splitline}${str_title_start}${font_fail_start}$(translate "fail2ban Ban")${font_fail_end}${str_title_end}"
 	else
-		f2b_title="${device_name:+${device_name}:}$(translate "fail2ban unbanned %s (%s)" "$ip" "$jail")"
+		f2b_title=$(named "$(translate "fail2ban unbanned %s (%s)" "$ip" "$jail")")
 		f2b_content_info="${str_splitline}${str_title_start}${font_success_start}$(translate "fail2ban Unban")${font_success_end}${str_title_end}"
 	fi
 
@@ -3525,7 +3518,7 @@ wifi_send() {
 
 	local w_title w_info
 	if [ "$event" = "connected" ]; then
-		w_title=$(translate "%s connected to %s WiFi" "$label" "$device_name" | squeeze)
+		w_title=$(named "$(translate "%s connected to WiFi" "$label")")
 		w_info="${str_splitline}${str_title_start}${font_success_start}$(translate "WiFi Connection")${font_success_end}${str_title_end}"
 		log_change "${disturb_text} $w_title"
 	elif [ "$banned" = "failed" ]; then
@@ -3829,7 +3822,7 @@ login_send() {
 				log_change "${disturb_text} $(translate "Device %s (%s) failed %s login %s (%s/%s)" "$login_ip" "$login_ip_attribution" "$log_type_short" "$login_mode" "$attempt_count" "$login_max_num")"
 			fi
 		else
-			local login_title=$(translate "%s logged in via %s to %s" "$login_ip" "$log_type_short" "${device_name:-$(translate "the router")}")
+			local login_title=$(named "$(translate "%s logged in via %s" "$login_ip" "$log_type_short")")
 			local login_content_info="${str_splitline}${str_title_start}${font_success_start}$(translate "Login Information")${font_success_end}${str_title_end}"
 			log_change "${disturb_text} $(translate "Device %s (%s) logged into router via %s %s" "$login_ip" "$login_ip_attribution" "$log_type_short" "$login_mode")"
 		fi

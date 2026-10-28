@@ -1677,11 +1677,32 @@ msgstr "初始化完成"
 msgid "Start running..."
 msgstr "开始运行..."
 
-msgid "%s connected to %s"
-msgstr "%s 连接 %s"
+msgid "%s connects"
+msgstr "%s 连接"
 
-msgid "%s disconnected from %s"
-msgstr "%s 断开 %s"
+msgid "%s disconnects"
+msgstr "%s 断开"
+
+msgid "%s connected to WireGuard"
+msgstr "%s 连接 WireGuard"
+
+msgid "%s disconnected from WireGuard"
+msgstr "%s 断开 WireGuard"
+
+msgid "%s connected to WiFi"
+msgstr "%s 连接 WiFi"
+
+msgid "%s logged in via %s"
+msgstr "%s 通过 %s 登录"
+
+msgid "%s up %s down %s"
+msgstr "%s上传%s 下载%s"
+
+msgid "%s up %s"
+msgstr "%s上传%s"
+
+msgid "%s down %s"
+msgstr "%s下载%s"
 
 msgid "Restarted"
 msgstr "重启"
@@ -1722,20 +1743,8 @@ msgstr "、"
 msgid "; "
 msgstr "；"
 
-msgid "%s: %s"
-msgstr "%s：%s"
-
-msgid "%s connected to %s WireGuard"
-msgstr "%s 连接 %s WireGuard"
-
-msgid "%s disconnected from %s WireGuard"
-msgstr "%s 断开 %s WireGuard"
-
 msgid "%s %s WireGuard endpoint changed"
 msgstr "%s %s WireGuard 端点变化"
-
-msgid "%s connected to %s WiFi"
-msgstr "%s 连接 %s WiFi"
 
 msgid "%s WiFi auth failed %s/%s"
 msgstr "%s WiFi 认证失败 %s/%s"
@@ -1746,59 +1755,11 @@ msgstr "%s WiFi 认证失败 封禁未生效"
 msgid "%s WiFi banned"
 msgstr "%s WiFi 已封禁"
 
-msgid "%s logged in via %s to %s"
-msgstr "%s 通过 %s 登录 %s"
-
-msgid "the router"
-msgstr "路由器"
-
 msgid "Router status"
 msgstr "路由状态"
 
 msgid "Send test"
 msgstr "发送测试"
-
-msgid "%s on %s: within %s min uploaded over %s"
-msgstr "%s 在 %s 上 %s 分钟内上传超过 %s"
-
-msgid "%s on %s: within %s min downloaded over %s"
-msgstr "%s 在 %s 上 %s 分钟内下载超过 %s"
-
-msgid "%s on %s: within %s min uploaded over %s, downloaded over %s"
-msgstr "%s 在 %s 上 %s 分钟内上传超过 %s，下载超过 %s"
-
-msgid "%s on %s: within %s min uploaded over %s, within %s min downloaded over %s"
-msgstr "%s 在 %s 上 %s 分钟内上传超过 %s，%s 分钟内下载超过 %s"
-
-msgid "%s on %s: within %s min traffic over %s"
-msgstr "%s 在 %s 上 %s 分钟内流量超过 %s"
-
-msgid "%s: within %s min uploaded over %s"
-msgstr "%s 在 %s 分钟内上传超过 %s"
-
-msgid "%s: within %s min downloaded over %s"
-msgstr "%s 在 %s 分钟内下载超过 %s"
-
-msgid "%s: within %s min uploaded over %s, downloaded over %s"
-msgstr "%s 在 %s 分钟内上传超过 %s，下载超过 %s"
-
-msgid "%s: within %s min uploaded over %s, within %s min downloaded over %s"
-msgstr "%s 在 %s 分钟内上传超过 %s，%s 分钟内下载超过 %s"
-
-msgid "%s: within %s min traffic over %s"
-msgstr "%s 在 %s 分钟内流量超过 %s"
-
-msgid "%s uploaded over %s"
-msgstr "%s 上传超过 %s"
-
-msgid "%s downloaded over %s"
-msgstr "%s 下载超过 %s"
-
-msgid "%s uploaded over %s, downloaded over %s"
-msgstr "%s 上传超过 %s，下载超过 %s"
-
-msgid "%s traffic over %s"
-msgstr "%s 流量超过 %s"
 
 msgid "Scanning online devices"
 msgstr "扫描在线设备"
