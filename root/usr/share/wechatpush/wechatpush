@@ -55,7 +55,7 @@ read_config() {
 		"unattended_enable" "zerotier_helper" "unattended_only_on_disturb_time" "unattended_device_aliases" "network_disconnect_event" "unattended_autoreboot_mode" "autoreboot_system_uptime" "autoreboot_network_uptime" \
 		"device_info_helper" "gateway_host_url" "gateway_info_url" "gateway_logout_url" "gateway_username_id" "gateway_password_id" "gateway_username" "gateway_password" "miwifi_ip" "miwifi_password" "mikrotik_ip" "mikrotik_username" "op_host_ips" "scan_ip_range" "device_info_helper_sleeptime" \
 		"lan_interface" "wireguard_exclude" \
-		"usage_backend" "bandix_api_host" "bandix_api_port" "client_usage_fresh_time" "client_usage_fresh_tolerance" \
+		"usage_backend" "bandix_api_host" "bandix_api_port" "log_scan" "client_usage_fresh_time" "client_usage_fresh_tolerance" \
 		"font_title" "font_success" "font_fail" "font_client" "font_module" \
 		"fail2ban_enable"
 
@@ -183,6 +183,21 @@ get_signal_dbm() {
 	return 1
 }
 
+# 启动时记录一次：开了哪些扫描、间隔多久。平时只记状态变化和事件；打开"记录每次扫描"后每次扫描都会记一行
+scan_startup_log() {
+	local iface=$(echo "$lan_interface" | tr '\n' ' ' | sed 's/ *$//')
+	log_change "[INFO] $(translate "Scanning online devices")${iface:+(${iface})}"
+	[ "$wireguard_info_enable" = "true" ] && log_change "[INFO] $(translate "Scanning WireGuard interfaces, every %s s" "${wireguard_scan_interval:-$sleeptime}")"
+	[ "$client_usage" = "1" ] && log_change "[INFO] $(translate "Scanning abnormal traffic(%s), every %s s" "${usage_backend:-wrtbwmon}" "${client_usage_scan_interval:-300}")"
+	local helpers=""
+	[ "$gateway_info_enable" = "true" ] && helpers="${helpers:+$helpers }$(translate "Optical modem")"
+	[ "$miwifi_info_enable" = "true" ] && helpers="${helpers:+$helpers }MiWiFi"
+	[ "$openwrt_info_enable" = "true" ] && helpers="${helpers:+$helpers }OpenWrt"
+	[ "$mikrotik_info_enable" = "true" ] && helpers="${helpers:+$helpers }MikroTik"
+	[ -n "$helpers" ] && log_change "[INFO] $(translate "Fetching device info(%s), every %s s" "$helpers" "${device_info_helper_sleeptime:-600}")"
+	[ "${log_scan:-0}" = "1" ] && log_change "[INFO] $(translate "Logging every scan is enabled (debug)")"
+}
+
 # 初始化
 init() {
 	# 检测程序开关
@@ -190,6 +205,7 @@ init() {
 	[ -f "$logfile" ] && local logrow=$(grep -c "" "$logfile") || local logrow="0"
 	[ "$logrow" -ne 0 ] && echo "---------------------------------------------------------------------------------------" >>${logfile}
 	log_change "[INFO] $(translate "Start running...")"
+	scan_startup_log
 	if [ -f "/usr/share/wechatpush/errlog" ]; then
 		cat /usr/share/wechatpush/errlog >${logfile}
 		log_change "[ERROR] $(translate "Loaded logs from previous restart")"
@@ -404,6 +420,7 @@ main() {
 
 		# 网络状态与 IP 变动
 		if { [ "$get_ipv4_mode" -ne "0" ] || [ "$get_ipv6_mode" -ne "0" ]; } && scan_due net "$net_scan_interval"; then
+			scan_log "$(translate "Scanning network and IP changes")"
 			check_connect
 			ip_changes
 		fi
@@ -451,7 +468,6 @@ main() {
 
 		# 推送
 		if [ ! -f "${dir}/send_enable.lock" ] && [ -n "$title" ] && [ -n "$content" ]; then
-			[ -n "$device_name" ] && title="【$device_name】$title"
 			(echo "$lite_enable" | grep -q "content") && content="$title"
 			disturb
 			disturb_RETVAL=$?
@@ -519,10 +535,76 @@ file_date() {
 # 流量数据单位换算
 bytes_for_humans() {
 	[ -z "$1" ] && return
-	[ "$1" -gt 1073741824 ] && echo "$(awk 'BEGIN{printf "%.2f\n",'$1'/'1073741824'}') GB" && return
-	[ "$1" -gt 1048576 ] && echo "$(awk 'BEGIN{printf "%.2f\n",'$1'/'1048576'}') MB" && return
+	[ "$1" -ge 1073741824 ] && echo "$(awk 'BEGIN{printf "%.2f\n",'$1'/'1073741824'}') GB" && return
+	[ "$1" -ge 1048576 ] && echo "$(awk 'BEGIN{printf "%.2f\n",'$1'/'1048576'}') MB" && return
 	[ "$1" -gt 1024 ] && echo "$(awk 'BEGIN{printf "%.2f\n",'$1'/'1024'}') KB" && return
 	echo "${1} bytes"
+}
+
+# 标题和阈值里用的简写：1073741824 -> 1G，524288000 -> 500M，1610612736 -> 1.5G
+bytes_short() {
+	[ -z "$1" ] && return
+	awk -v b="$1" 'BEGIN {
+		if (b >= 1073741824) { v = b / 1073741824; u = "G" }
+		else if (b >= 1048576) { v = b / 1048576; u = "M" }
+		else if (b >= 1024) { v = b / 1024; u = "K" }
+		else { v = b; u = "B" }
+		s = sprintf("%.2f", v); sub(/0+$/, "", s); sub(/\.$/, "", s); print s u }'
+}
+
+# 合并连续空格并去掉首尾空格（路由器名称为空时，标题里会多出空格）
+squeeze() {
+	sed 's/  */ /g; s/^ //; s/ $//'
+}
+
+# 在标题最前面加上路由器名称（基本设置里的"设备名称"），没设置就不加
+named() {
+	[ -n "$device_name" ] && echo "$device_name $1" || echo "$1"
+}
+
+# 同一轮的多个事件合并成一个标题。计数写在 ${dir}/title_stat，每行: <类型> <数量> <文字>
+#   online 设备连接（文字=设备名列表）  offline 设备断开（同上）
+#   usage 流量异常（文字=组好的标题）   other 其他提醒（重启、IP 变化、CPU，文字=第一条的标题）
+# 参数: $1 类型  $2 文字  $3 增加的数量(默认 1)  $4 replace=只替换 other 的文字
+title_event() {
+	local f="${dir}/title_stat"
+	[ -f "$f" ] || : >"$f"
+	T="$2" awk -v k="$1" -v a="${3:-1}" -v m="$4" '
+		$1==k { found=1; n=$2+a; rest=$0; sub(/^[^ ]+ [^ ]+ ?/, "", rest); t=ENVIRON["T"]
+			if (k=="other") { if (m=="replace" || rest=="") rest=t }
+			else if (t != "") rest=(rest=="" ? t : rest " " t)
+			print k " " n " " rest; next }
+		{ print }
+		END { if (!found) print k " " a " " ENVIRON["T"] }' "$f" >"${f}.tmp" && mv "${f}.tmp" "$f"
+}
+
+# 根据 title_stat 生成标题：只有一类事件就用该类事件自己的标题，多类事件合并成"设备状态变化（2 连接、1 断开）"
+title_compose() {
+	local f="${dir}/title_stat"
+	[ -s "$f" ] || return
+	if [ "$(grep -c "" "$f")" -eq 1 ]; then
+		local kind=$(awk '{print $1; exit}' "$f")
+		local rest=$(awk '{ sub(/^[^ ]+ [^ ]+ ?/, ""); print; exit }' "$f")
+		case "$kind" in
+			online) named "$(translate "%s connects" "$rest")" ;;
+			offline) named "$(translate "%s disconnects" "$rest")" ;;
+			*) echo "$rest" ;;
+		esac
+		return
+	fi
+	local on=$(awk '$1=="online"{print $2}' "$f") off=$(awk '$1=="offline"{print $2}' "$f")
+	local us=$(awk '$1=="usage"{print $2}' "$f") ot=$(awk '$1=="other"{print $2}' "$f")
+	local sep="$(translate ", ")" parts=""
+	[ "${us:-0}" -gt 0 ] && parts="$(translate "%s traffic alerts" "$us")"
+	[ "${on:-0}" -gt 0 ] && parts="${parts:+${parts}${sep}}$(translate "%s up" "$on")"
+	[ "${off:-0}" -gt 0 ] && parts="${parts:+${parts}${sep}}$(translate "%s down" "$off")"
+	[ "${ot:-0}" -gt 0 ] && parts="${parts:+${parts}${sep}}$(translate "%s notices" "$ot")"
+	named "$(translate "Device status changed (%s)" "$parts")"
+}
+
+# 调试开关 log_scan 打开时，每次扫描都记一行
+scan_log() {
+	[ "${log_scan:-0}" = "1" ] && log_change "[DEBUG] $1"
 }
 
 # 时间单位换算
@@ -705,9 +787,12 @@ run_with_tag() {
 # 清理临时文件
 deltemp() {
 	unset title content gateway_iplist
-	rm -f "${dir}/title" "${dir}/content" "${dir}/send_enable.lock" "${tempjsonpath}" "${dir}/cookies.txt" >/dev/null 2>&1
+	rm -f "${dir}/title" "${dir}/title_stat" "${dir}/content" "${dir}/send_enable.lock" "${tempjsonpath}" "${dir}/cookies.txt" >/dev/null 2>&1
 	[ -f "$logfile" ] && local logrow=$(grep -c "" "$logfile") || local logrow="0"
-	[ "$logrow" -gt 500 ] && tail -n 300 "$logfile" >"${logfile}.tmp" && mv "${logfile}.tmp" "$logfile" && log_change "[DEBUG] $(translate "Log exceeded limit, keeping last 300 entries")"
+	# 打开"记录每次扫描"后日志条数会多很多，上限放宽，免得登录、封禁这些记录很快被挤掉
+	local log_max=500 log_keep=300
+	[ "${log_scan:-0}" = "1" ] && log_max=3000 && log_keep=2000
+	[ "$logrow" -gt "$log_max" ] && tail -n "$log_keep" "$logfile" >"${logfile}.tmp" && mv "${logfile}.tmp" "$logfile" && log_change "[DEBUG] $(translate "Log exceeded %s lines, keeping the last %s" "$log_max" "$log_keep")"
 }
 
 # ------------------------------------
@@ -1315,7 +1400,8 @@ $(translate 'Interface:') ${IPv6_URL}"
 
 	if [ -z "$last_IPv4" ] && [ -z "$last_IPv6" ] && [[ -n "$IPv4" || -n "$IPv6" ]]; then
 		log_change "${disturb_text} $(translate "Router has rebooted!")"
-		title="$(translate "Router Rebooted")"
+		title_event other "$(named "$(translate "Restarted")")"
+		title=$(title_compose)
 		content="${content}\
 ${str_splitline}\
 ${str_title_start}$(translate "Router Rebooted")${str_title_end}"
@@ -1323,7 +1409,8 @@ ${str_title_start}$(translate "Router Rebooted")${str_title_end}"
 	
 	if [ "$get_ipv4_mode" -ne "0" ] && [ -n "$IPv4" ] && [ "$IPv4" != "$last_IPv4" ]; then
 		log_change "${disturb_text} $(translate "Current IP: %s from: %s" "$IPv4" "$IPv4_URL")"
-		[ -z "$title" ] && title="$(translate "IP Address Changed")"
+		title_event other "$(named "$(translate "IPv4 changed")")"
+		title=$(title_compose)
 		[ -z "$content" ] && content="${content}\
 ${str_splitline}\
 ${str_title_start}$(translate "IP Address Changed")${str_title_end}"
@@ -1334,7 +1421,8 @@ ${str_linefeed}${str_tab} - $(translate "Current IP:")  ${IPv4}"
 	
 	if [ "$get_ipv6_mode" -ne "0" ] && [ -n "$IPv6" ] && [ "$IPv6" != "$last_IPv6" ]; then
 		log_change "${disturb_text} $(translate "Current IPv6: %s from: %s" "$IPv6" "$IPv6_URL")"
-		[ -z "$title" ] && title="$(translate "IPv6 Address Changed")"
+		title_event other "$(named "$(translate "IPv6 changed")")"
+		title=$(title_compose)
 		[ -z "$content" ] && content="${content}\
 ${str_splitline}\
 ${str_title_start}$(translate "IPv6 Address Changed")${str_title_end}"
@@ -1414,6 +1502,8 @@ check_connect() {
 #
 # 检测 cpu 状态
 check_cpu_load() {
+	local cpu_alerted=""
+	{ [ -n "$notification_temp" ] && [ -n "$temperature_threshold" ]; } || { [ -n "$notification_load" ] && [ -n "$cpu_load_threshold" ]; } && scan_log "$(translate "Scanning CPU load and temperature")"
 	[ -z "$cpu_notification_duration" ] && cpu_notification_duration=$(time_for_humans $cpu_notification_delay)
 	if [ -n "$notification_temp" ] && [ -n "$temperature_threshold" ]; then
 		[ -z "$temp_last_overload_time" ] && temp_last_overload_time=$(date +%s)
@@ -1421,16 +1511,15 @@ check_cpu_load() {
 
 		if [ -n "$cpu_temp" ] && awk -v t="$cpu_temp" -v th="$temperature_threshold" 'BEGIN { exit !(t > th) }'; then
 			log_change "[WARN] $(translate "CPU temperature too high: %s" "$cpu_temp")"
+			cpu_temp_was_high=1
 
 			# 检查是否达到持续时间阈值
 			if [ "$cpu_threshold_duration" -eq 0 ] || [ "$(($(date +%s) - $temp_last_overload_time))" -ge "$cpu_threshold_duration" ]; then
 				# 检查是否达到推送间隔阈值
 				if [ -z "$temperaturecd_time" ] || [ "$(($(date +%s) - $temperaturecd_time))" -ge "$cpu_notification_delay" ]; then
-					if [ -n "$title" ] && (echo "$title" | grep -q "$(translate "too high")"); then
-						title="$(translate "Device Alert!")"
-					else
-						title="$(translate "CPU Temperature Too High!")"
-					fi
+					title_event other "$(named "$(translate "CPU temperature too high %s°C" "$cpu_temp")")"
+					title=$(title_compose)
+					cpu_alerted=1
 
 					temperaturecd_time=$(date +%s) # 记录本次推送的时间戳
 					log_change "[WARN] $(translate "CPU temperature too high: %s" "$cpu_temp")"
@@ -1445,6 +1534,8 @@ ${str_linefeed}${str_tab} - $(translate "Current temperature: %s℃" "$cpu_temp"
 				fi
 			fi
 		else
+			# 温度恢复正常时记一条
+			[ -n "$cpu_temp_was_high" ] && [ -n "$cpu_temp" ] && log_change "[INFO] $(translate "CPU temperature back to normal: %s" "$cpu_temp")" && cpu_temp_was_high=""
 			# 温度正常，重置计时器
 			temp_last_overload_time=$(date +%s)
 		fi
@@ -1456,17 +1547,20 @@ ${str_linefeed}${str_tab} - $(translate "Current temperature: %s℃" "$cpu_temp"
 
 		if [ -n "$cpu_load" ] && awk -v t="$cpu_load" -v th="$cpu_load_threshold" 'BEGIN { exit !(t > th) }'; then
 			log_change "[ALERT] $(translate "CPU load too high: ${cpu_load}")"
+			cpu_load_was_high=1
 			cputop log
 
 			# 检查是否达到持续时间阈值
 			if [ "$cpu_threshold_duration" -eq 0 ] || [ "$(($(date +%s) - $cpu_last_overload_time))" -ge "$cpu_threshold_duration" ]; then
 				# 检查是否达到推送间隔阈值
 				if [ -z "$cpucd_time" ] || [ "$(($(date +%s) - $cpucd_time))" -ge "$cpu_notification_delay" ]; then
-					if [ -n "$title" ] && (echo "$title" | grep -q "$(translate "too high")"); then
-						title="$(translate "Device Alert!")"
+					if [ -n "$cpu_alerted" ]; then
+						# 温度和负载同时过高：合并成一个标题
+						title_event other "$(named "$(translate "Device alert")")" 0 replace
 					else
-						title="$(translate "CPU Load Too High!")"
+						title_event other "$(named "$(translate "CPU load too high %s" "$cpu_load")")"
 					fi
+					title=$(title_compose)
 
 					cpucd_time=$(date +%s) # 记录本次推送的时间戳
 					log_change "${disturb_text} $(translate "CPU load too high: %s" "${cpu_load}")"
@@ -1483,6 +1577,8 @@ ${str_linefeed}${str_tab} - $(translate "Current load: %s" "$cpu_load")"
 				fi
 			fi
 		else
+			# 负载恢复正常时记一条
+			[ -n "$cpu_load_was_high" ] && [ -n "$cpu_load" ] && log_change "[INFO] $(translate "CPU load back to normal: %s" "$cpu_load")" && cpu_load_was_high=""
 			# 负载正常，重置计时器
 			cpu_last_overload_time=$(date +%s)
 		fi
@@ -1726,6 +1822,7 @@ getgateway() {
 	[ "$1" ] && [ "$1" == "reboot" ] && last_getgateway_time="$device_info_helper_sleeptime" || last_getgateway_time=$(file_date "${dir}/gateway_info")
 
 	if [ "$last_getgateway_time" -ge "$device_info_helper_sleeptime" ]; then
+		scan_log "$(translate "Fetching device info(%s)" "$(translate "Optical modem")")"
 		# 登录
 		local loginfo=$(run_with_tag curl -s -L "${gateway_host_url}" -c ${dir}/cookies.txt -d "${gateway_username_id}=${gateway_username}&${gateway_password_id}=${gateway_password}") 2>/dev/null
 		[ -n "$loginfo" ] && local mytoken=$(echo $loginfo | sed 's/{/\n/g' | grep token | awk '/realRestart/{print $2}' | sed $'s/\'//g')
@@ -1761,6 +1858,7 @@ getmiwifi() {
 	local last_getmiwifi_time=$(file_date "${dir}/miwifi_info")
 
 	if [ "$last_getmiwifi_time" -ge "$device_info_helper_sleeptime" ]; then
+		scan_log "$(translate "Fetching device info(%s)" "MiWiFi")"
 		# 登录并获取 stok
 		local miwifi_login_url="http://${miwifi_ip}/cgi-bin/luci/api/xqsystem/login"
 		local login_response=$(run_with_tag curl -s -X POST "$miwifi_login_url" -d "username=admin&password=${miwifi_password}")
@@ -1878,6 +1976,7 @@ getopenwrt() {
 	[ -z "$openwrt_info_enable" ] && return
 	local last_openwrt_time=$(file_date "${dir}/openwrt_info")
 	if [ "$last_openwrt_time" -ge "$device_info_helper_sleeptime" ]; then
+		scan_log "$(translate "Fetching device info(%s)" "OpenWrt")"
 		# 初始化一个空数组（bash 数组）
 		local json_array=()
 		local arp_pairs=""
@@ -1959,6 +2058,7 @@ getmikrotik() {
 	local last_getmikrotik_time=$(file_date "${dir}/mikrotik_info")
 
 	if [ "$last_getmikrotik_time" -ge "$device_info_helper_sleeptime" ]; then
+		scan_log "$(translate "Fetching device info(%s)" "MikroTik")"
 		lease_info=$(run_with_tag ssh -o ConnectTimeout=5 ${mikrotik_username}@${mikrotik_ip} "/ip dhcp-server lease print terse where status=bound")
 
 		echo "$lease_info" | awk '
@@ -2152,7 +2252,7 @@ getwireguard() {
 
 	echo "$new_state" | grep -v "^$" >"$state_file"
 	wireguard_iplist=$(echo "$wireguard_iplist" | grep -v "^$" | sort -u)
-	log_change "[DEBUG] $(translate "WireGuard interfaces: %s -> currently active peers (handshake within %ss): %s" "$wireguard_interface" "$wg_handshake_fresh_seconds" "$(echo "$wireguard_iplist" | tr '\n' ' ')")"
+	scan_log "$(translate "Scanning WireGuard interfaces(%s): %s active" "$wireguard_interface" "$(echo "$wireguard_iplist" | grep -c .)")"
 }
 
 # WireGuard 对等端连接/断开推送（实时，不并入批量推送队列，与 login_send 的处理方式一致）
@@ -2170,13 +2270,13 @@ wireguard_send() {
 
 	local wg_title wg_content_info
 	if [ "$event" = "connected" ]; then
-		wg_title=$(translate "WireGuard peer %s connected" "$peer_label")
+		wg_title=$(named "$(translate "%s connected to WireGuard" "$peer_label")")
 		wg_content_info="${str_splitline}${str_title_start}${font_success_start}$(translate "WireGuard Peer Connected")${font_success_end}${str_title_end}"
 	elif [ "$event" = "endpoint_changed" ]; then
-		wg_title=$(translate "WireGuard peer %s endpoint changed" "$peer_label")
+		wg_title=$(translate "%s %s WireGuard endpoint changed" "$device_name" "$peer_label" | squeeze)
 		wg_content_info="${str_splitline}${str_title_start}${font_fail_start}$(translate "WireGuard Peer Endpoint Changed")${font_fail_end}${str_title_end}"
 	else
-		wg_title=$(translate "WireGuard peer %s disconnected" "$peer_label")
+		wg_title=$(named "$(translate "%s disconnected from WireGuard" "$peer_label")")
 		wg_content_info="${str_splitline}${str_title_start}${font_fail_start}$(translate "WireGuard Peer Disconnected")${font_fail_end}${str_title_end}"
 	fi
 
@@ -2196,7 +2296,7 @@ wireguard_send() {
 
 	disturb
 	local disturb_RETVAL=$?
-	[ -n "$device_name" ] && wg_title="【$device_name】$wg_title"
+	log_change "[INFO] ${wg_title}"
 	(echo "$lite_enable" | grep -q "content") && wg_content="$wg_title"
 	[ "$disturb_RETVAL" -eq 0 ] && diy_send "${wg_title}" "${wg_content}" "${jsonpath}" >/dev/null 2>&1
 }
@@ -2233,7 +2333,7 @@ first() {
 	local IPLIST
 	if [ -n "$lan_interface" ]; then
 		local lan_devices=$(resolve_iface_devices "$lan_interface" "${dir}/lan_devices_cache")
-		log_change "[DEBUG] $(translate "LAN scan (manual, allowlist): %s -> devices: %s" "$lan_interface" "$(echo "$lan_devices" | tr '\n' ' ')")"
+		scan_log "$(translate "Scanning online devices")($(echo "$lan_interface" | tr '\n' ' ' | sed 's/ *$//'))"
 		IPLIST=$(cat /proc/net/arp | grep "0x2\|0x6" | grep -v "^169.254." | grep -v "^$" | awk -v devs="$lan_devices" '
 			BEGIN { n = split(devs, arr, "\n"); for (i = 1; i <= n; i++) if (arr[i] != "") dev_ok[arr[i]] = 1 }
 			($6 in dev_ok) { print $1 }
@@ -2243,7 +2343,7 @@ first() {
 		# luci-app-pushbot 验证过的做法，比自己维护一份"已知 WAN 接口"黑名单更可靠：
 		# 只要设备的 ARP 记录出现在这台路由器上（不管来自哪个网桥/网段/旁路路由透传进来的
 		# 管理网段），就一定会被扫到，不存在因为接口枚举遗漏或识别错误而漏检的可能
-		log_change "[DEBUG] $(translate "LAN scan (auto): scanning entire ARP table, no interface filtering")"
+		scan_log "$(translate "Scanning online devices")"
 		IPLIST=$(cat /proc/net/arp | grep "0x2\|0x6" | awk '{print $1}' | grep -v "^169.254." | grep -v "^$" | sort -u | grep -oE '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}')
 	fi
 
@@ -2320,15 +2420,11 @@ up() {
 			[ -f "${dir}/title" ] && local title=$(cat "${dir}/title")
 			[ -f "${dir}/content" ] && local content=$(cat "${dir}/content")
 
-			if [ -z "$title" ]; then
-				local title=$(translate "%s connected to your router" "$name")
-				local content_title="${str_title_start}${font_success_start}$(translate "New device connected")${font_success_end}${str_title_end}"
-			elif echo "$title" | grep -q "$(translate "connected to your router")"; then
-				local title="${name} ${title}"
-			else
-				local title="$(translate "Device status changed")"
-				local content_title="${str_title_start}${font_success_start}$(translate "New device connected")${font_success_end}${str_title_end}"
-			fi
+			# 同一轮已经有设备连接的话，沿用同一个小标题，不再重复
+			local content_title="${str_title_start}${font_success_start}$(translate "New device connected")${font_success_end}${str_title_end}"
+			grep -q '^online ' "${dir}/title_stat" 2>/dev/null && content_title=""
+			title_event online "$name"
+			local title=$(title_compose)
 
 			content="\
 ${str_splitline}\
@@ -2566,6 +2662,7 @@ unattended() {
 	[ -n "$unattended_only_on_disturb_time" ] && [ "$unattended_only_on_disturb_time" -eq "1" ] && [ -z "$sheep_starttime" ] && return
 	geterrdevicealiases
 	[ $? -eq "1" ] && return
+	scan_log "$(translate "Scanning unattended tasks")"
 
 	if [ -n "$unattended_autoreboot_mode" ]; then
 		local interfaceuptime=$(getinterfaceuptime)
@@ -2681,6 +2778,35 @@ usage_fresh_suppress() {
 	return 0
 }
 
+# 窗口时间的简写：5 -> 5m，90 -> 1.5h，120 -> 2h
+time_short() {
+	awk -v m="$1" 'BEGIN { if (m < 60) printf "%dm", m; else { s = sprintf("%.1f", m / 60); sub(/\.0$/, "", s); printf "%sh", s } }'
+}
+
+# 流量报警标题里这台设备的部分：时间 + 方向 + 超出多少（实际值 - 阈值），例如 1m上传1.73G 下载44.55G
+# 两个方向窗口相同时时间只写一次；只配了总流量时写成 "1h 0.3G"（没有方向字，中间留一个空格免得和数字连在一起）
+# 依赖调用者(get_client_usage)里的局部变量: hit_up hit_down hit_total up_el down_el total_el up_min down_min up_max down_max total_max d_up d_down d_total
+usage_title_body() {
+	local eu=0 ed=0 et=0
+	if [ -n "$hit_total" ]; then
+		et=$(( ${d_total:-0} - ${total_max:-0} )); [ "$et" -lt 0 ] && et=0
+		echo "$(time_short "$total_el") $(bytes_short "$et")"
+		return
+	fi
+	[ -n "$hit_up" ] && eu=$(( ${d_up:-0} - ${up_max:-0} )) && [ "$eu" -lt 0 ] && eu=0
+	[ -n "$hit_down" ] && ed=$(( ${d_down:-0} - ${down_max:-0} )) && [ "$ed" -lt 0 ] && ed=0
+	local tu=$(time_short "$up_el") td=$(time_short "$down_el")
+	if [ -n "$hit_up" ] && [ -n "$hit_down" ] && [ "$up_min" = "$down_min" ]; then
+		translate "%s up %s down %s" "$tu" "$(bytes_short "$eu")" "$(bytes_short "$ed")"
+	elif [ -n "$hit_up" ] && [ -n "$hit_down" ]; then
+		echo "$(translate "%s up %s" "$tu" "$(bytes_short "$eu")") $(translate "%s down %s" "$td" "$(bytes_short "$ed")")"
+	elif [ -n "$hit_up" ]; then
+		translate "%s up %s" "$tu" "$(bytes_short "$eu")"
+	else
+		translate "%s down %s" "$td" "$(bytes_short "$ed")"
+	fi
+}
+
 # 设备异常流量检测
 # 上传、下载各有独立的"阈值 + 时间窗(分钟)"，窗口是固定周期：断线不清零，窗内重连继续累计，窗口到期才重置；，任意一个方向超标就推送，并只重置超标的那个方向
 # （例如上传 500M/60 分钟、下载 2G/120 分钟）；推送内容里上传和下载都会显示。
@@ -2716,13 +2842,15 @@ get_client_usage() {
 
 	local state_file="${dir}/client_usage_state"   # 每个 MAC+方向 的窗口累计状态，格式见 usage_track
 	local now=$(date +%s)
-	local usage_title_set=""
+	local usage_blocks="" usage_n=0
+	local -a usage_frags=()
 
 	# 每 5 分钟记录一次快照并检查一次
 	# 快照/检查间隔（秒）：高级设置里可调，默认 300；最小 30（主循环本身每 sleeptime 秒才醒一次）
 	local usage_interval="${client_usage_scan_interval:-300}"
 	[ "$usage_interval" -lt 30 ] 2>/dev/null && usage_interval=30
 	if [ "$((now - get_client_usage_time))" -ge "$usage_interval" ]; then
+		scan_log "$(translate "Scanning abnormal traffic(%s): %s devices" "${usage_backend:-wrtbwmon}" "$(echo "$MACLIST" | grep -c .)")"
 		local mac cur_total cur_in cur_out cur_has_direction
 		for mac in $MACLIST; do
 			read -r cur_total cur_in cur_out cur_has_direction <<<"$(get_usage_stats "$mac")"
@@ -2780,33 +2908,18 @@ get_client_usage() {
 				local ip_total=$(bytes_for_humans "$cur_total") && [ -n "$ip_total" ] && local ip_total="${str_linefeed}${str_tab} - $(translate "Total Traffic:") ${str_space}${str_space}${str_space}${str_space}${ip_total}"
 				local time1=$(time_for_humans $(expr $(date +%s) - ${time_up}))
 
-				# 标题：(设备) 在 (分钟) 内上传超过 (阈值)；上传下载同时超标时两段并列
-				local dev_title=""
-				[ -n "$hit_up" ] && dev_title="$(translate "within %s min uploaded over %s" "$up_el" "$(bytes_for_humans "$up_max")")"
-				[ -n "$hit_down" ] && dev_title="${dev_title:+${dev_title}, }$(translate "within %s min downloaded over %s" "$down_el" "$(bytes_for_humans "$down_max")")"
-				[ -n "$hit_total" ] && dev_title="$(translate "within %s min traffic over %s" "$total_el" "$(bytes_for_humans "$total_max")")"
-				dev_title="${ip_name} ${dev_title}"
-
-				local content_title=""
-				if [ -z "$title" ]; then
-					title="$dev_title"
-					content_title="${str_splitline}${str_title_start}${font_fail_start}$(translate "Device abnormal traffic")${font_fail_end}${str_title_end}"
-				elif [ -n "$usage_title_set" ]; then
-					title="${title}; ${dev_title}"
-					content_title="${str_splitline}${str_title_start}${font_fail_start}$(translate "Device abnormal traffic")${font_fail_end}${str_title_end}"
-				else
-					title="$(translate "Device status changed")"
-					content_title="${str_splitline}${str_title_start}${font_fail_start}$(translate "Device abnormal traffic")${font_fail_end}${str_title_end}"
-				fi
-				usage_title_set="1"
+				# 标题：本台设备的单独标题和多台合并时用的片段；最终标题在循环结束后统一生成
+				usage_frags+=("${ip_name} $(usage_title_body)")
+				usage_n=$((usage_n + 1))
+				local content_title="${str_splitline}${str_title_start}${font_fail_start}$(translate "Device abnormal traffic")${font_fail_end}${str_title_end}"
 
 				# 内容：上传、下载都显示（含各自的窗口、增量与阈值）；超标的方向打标记
 				local detail=""
 				if [ "$dir_ok" = "1" ] && { [ -n "$up_max" ] || [ -n "$down_max" ]; }; then
 					local up_txt="${d_up:+$(bytes_for_humans "$d_up")}"; [ -z "$up_txt" ] && up_txt="$(translate "collecting")"
 					local down_txt="${d_down:+$(bytes_for_humans "$d_down")}"; [ -z "$down_txt" ] && down_txt="$(translate "collecting")"
-					[ -n "$up_max" ] && up_txt="${up_txt} / $(bytes_for_humans "$up_max")"
-					[ -n "$down_max" ] && down_txt="${down_txt} / $(bytes_for_humans "$down_max")"
+					[ -n "$up_max" ] && up_txt="${up_txt} / $(bytes_short "$up_max")"
+					[ -n "$down_max" ] && down_txt="${down_txt} / $(bytes_short "$down_max")"
 					[ -n "$hit_up" ] && up_txt="${up_txt} ⚠"
 					[ -n "$hit_down" ] && down_txt="${down_txt} ⚠"
 					detail="${str_linefeed}${str_tab} - $(translate "Upload in %s min:" "$up_el")${str_space}${str_space}${up_txt}"
@@ -2818,8 +2931,7 @@ get_client_usage() {
 				local wxjk_dbm=$(get_signal_dbm "$mac")
 				[ -n "$wxjk_dbm" ] && detail_dbm="${str_linefeed}${str_tab} - $(translate "Signal Strength:")${str_space}${str_space}${wxjk_dbm} dBm"
 
-				content="\
-${content}\
+				usage_blocks="${usage_blocks}\
 ${content_title}\
 ${str_linefeed}${str_tab} - $(translate "Client Name:")${str_space}${str_space}${str_space}${str_space}${str_space}${font_client_start}${ip_name}${font_client_end}\
 ${str_linefeed}${str_tab} - $(translate "Client IP:")${str_space}${str_space}${str_space}${str_space}${ip}\
@@ -2834,6 +2946,17 @@ ${str_linefeed}${str_tab} - $(translate "Uptime:")${str_space}${str_space}${str_
 			fi
 
 		done
+
+		# 流量报警放在最上面：标题也让它领头（同一轮有设备连接/断开时合并成"设备状态变化（…）"）
+		if [ "$usage_n" -gt 0 ]; then
+			# 多台设备同时超标：用 "；" 隔开，路由器名称只在最前面写一次
+			local usage_sep="$(translate "; ")" usage_joined="" usage_frag
+			for usage_frag in "${usage_frags[@]}"; do usage_joined="${usage_joined:+${usage_joined}${usage_sep}}${usage_frag}"; done
+			local usage_text=$(named "$usage_joined")
+			title_event usage "$usage_text" "$usage_n"
+			title=$(title_compose)
+			content="${usage_blocks}${content}"
+		fi
 
 		# 每 10 分钟清掉超过 2 天没有读数的状态行（设备已不在了）
 		if [ "$((now - ${client_usage_clean_time:-0}))" -ge 600 ]; then
@@ -3203,10 +3326,10 @@ fail2ban_send() {
 
 	local f2b_title f2b_content_info
 	if [ "$event" = "ban" ]; then
-		f2b_title=$(translate "fail2ban banned %s (%s)" "$ip" "$jail")
+		f2b_title=$(named "$(translate "fail2ban banned %s (%s)" "$ip" "$jail")")
 		f2b_content_info="${str_splitline}${str_title_start}${font_fail_start}$(translate "fail2ban Ban")${font_fail_end}${str_title_end}"
 	else
-		f2b_title=$(translate "fail2ban unbanned %s (%s)" "$ip" "$jail")
+		f2b_title=$(named "$(translate "fail2ban unbanned %s (%s)" "$ip" "$jail")")
 		f2b_content_info="${str_splitline}${str_title_start}${font_success_start}$(translate "fail2ban Unban")${font_success_end}${str_title_end}"
 	fi
 
@@ -3221,7 +3344,7 @@ fail2ban_send() {
 
 	disturb
 	local disturb_RETVAL=$?
-	[ -n "$device_name" ] && f2b_title="【$device_name】$f2b_title"
+	log_change "[INFO] ${f2b_title}"
 	(echo "$lite_enable" | grep -q "content") && f2b_content="$f2b_title"
 	[ "$disturb_RETVAL" -eq 0 ] && diy_send "${f2b_title}" "${f2b_content}" "${jsonpath}" >/dev/null 2>&1
 }
@@ -3427,19 +3550,19 @@ wifi_send() {
 
 	local w_title w_info
 	if [ "$event" = "connected" ]; then
-		w_title=$(translate "WiFi device %s connected" "$label")
+		w_title=$(named "$(translate "%s connected to WiFi" "$label")")
 		w_info="${str_splitline}${str_title_start}${font_success_start}$(translate "WiFi Connection")${font_success_end}${str_title_end}"
 		log_change "${disturb_text} $w_title"
 	elif [ "$banned" = "failed" ]; then
-		w_title=$(translate "WiFi device %s frequent auth failures, ban could not be confirmed" "$label")
+		w_title=$(named "$(translate "%s WiFi auth failed, ban not in effect" "$label")")
 		w_info="${str_splitline}${str_title_start}${font_fail_start}$(translate "Frequent WiFi Auth Failures")${font_fail_end}${str_title_end}"
 		log_change "${disturb_text} $w_title"
 	elif [ "$banned" = "1" ]; then
-		w_title=$(translate "WiFi device %s frequent auth failures, blocked" "$label")
+		w_title=$(named "$(translate "%s WiFi banned" "$label")")
 		w_info="${str_splitline}${str_title_start}${font_fail_start}$(translate "Frequent WiFi Auth Failures")${font_fail_end}${str_title_end}"
 		log_change "${disturb_text} $w_title"
 	else
-		w_title=$(translate "WiFi device %s auth failed (%s/%s)" "$label" "$count" "${wifi_max_num:-3}")
+		w_title=$(named "$(translate "%s WiFi auth failed %s/%s" "$label" "$count" "${wifi_max_num:-3}")")
 		w_info="${str_splitline}${str_title_start}${font_fail_start}$(translate "WiFi Auth Failed")${font_fail_end}${str_title_end}"
 		log_change "${disturb_text} $w_title"
 	fi
@@ -3453,7 +3576,6 @@ wifi_send() {
 
 	disturb
 	local disturb_RETVAL=$?
-	[ -n "$device_name" ] && w_title="【$device_name】$w_title"
 	(echo "$lite_enable" | grep -q "content") && w_content="$w_title"
 	[ "$disturb_RETVAL" -eq 0 ] && diy_send "${w_title}" "${w_content}" "${jsonpath}" >/dev/null 2>&1
 }
@@ -3547,8 +3669,8 @@ send() {
 	#[ -z "$1" ] && ( echo "$send_notification"|grep -q "disk_info" ) && get_disk &
 	[ -z "$1" ] && get_disk &
 
-	[ -z "$1" ] && send_title="$(translate "Router status:")"
-	[ -n "$1" ] && send_title="$(translate "Send test:")" && send_content="\
+	[ -z "$1" ] && send_title="$(named "$(translate "Router status")")"
+	[ -n "$1" ] && send_title="$(named "$(translate "Send test")")" && send_content="\
 ${str_splitline}\
 ${str_title_start}$(translate "Content 1")${str_title_end}\
 ${str_linefeed}\
@@ -3664,7 +3786,6 @@ ${str_tab} - ${wanstatustime}"
 		send_content="${send_content}${current_device}"
 	fi
 
-	[ -n "$device_name" ] && send_title="【$device_name】${send_title}"
 	[ -z "$send_content" ] && send_content="\
 ${str_splitline}\
 ${str_title_start}$(translate "I encountered a problem")${str_title_end}\
@@ -3724,16 +3845,16 @@ login_send() {
 	if [ -z "$login_disturb" ] || [ "$login_disturb" -ne "1" ]; then
 		if [[ "$log_type" == *"failed"* ]]; then
 			if [ "$banned" = "1" ]; then
-				local login_title=$(translate "%s frequent %s login attempts, blocked" "$login_ip" "$log_type_short")
+				local login_title=$(named "$(translate "%s frequent %s login attempts, blocked" "$login_ip" "$log_type_short")")
 				local login_content_info="${str_splitline}${str_title_start}${font_fail_start}$(translate "Frequent Login Attempts Information")${font_fail_end}${str_title_end}"
 				log_change "${disturb_text} $(translate "Device %s (%s) frequently attempted %s %s login, blocked" "$login_ip" "$login_ip_attribution" "$log_type_short" "$login_mode")"
 			else
-				local login_title=$(translate "%s failed %s login attempt (%s/%s)" "$login_ip" "$log_type_short" "$attempt_count" "$login_max_num")
+				local login_title=$(named "$(translate "%s failed %s login attempt (%s/%s)" "$login_ip" "$log_type_short" "$attempt_count" "$login_max_num")")
 				local login_content_info="${str_splitline}${str_title_start}${font_fail_start}$(translate "Login Failed Information")${font_fail_end}${str_title_end}"
 				log_change "${disturb_text} $(translate "Device %s (%s) failed %s login %s (%s/%s)" "$login_ip" "$login_ip_attribution" "$log_type_short" "$login_mode" "$attempt_count" "$login_max_num")"
 			fi
 		else
-			local login_title=$(translate "%s logged into router via %s" "$login_ip" "$log_type_short")
+			local login_title=$(named "$(translate "%s logged in via %s" "$login_ip" "$log_type_short")")
 			local login_content_info="${str_splitline}${str_title_start}${font_success_start}$(translate "Login Information")${font_success_end}${str_title_end}"
 			log_change "${disturb_text} $(translate "Device %s (%s) logged into router via %s %s" "$login_ip" "$login_ip_attribution" "$log_type_short" "$login_mode")"
 		fi
@@ -3754,7 +3875,6 @@ ${str_space}${log_type_short} ${login_mode}"
 	disturb
 	disturb_RETVAL=$?
 	[ -z "$login_title" ] && return
-	[ -n "$device_name" ] && login_title="【$device_name】$login_title"
 	(echo "$lite_enable" | grep -q "content") && login_content="$login_title"
 	[ "$disturb_RETVAL" -eq 0 ] && [ -n "$login_title" ] && diy_send "${login_title}" "${login_content}" "${jsonpath}" >/dev/null 2>&1
 }
@@ -3779,16 +3899,11 @@ down_send() {
 		local time1=$(date +%s)
 		local time1=$(time_for_humans $(expr ${time1} - ${time_up}))
 
-		if [ -z "$title" ]; then
-			title=$(translate "%s disconnected" "$name")
-			content_title="${str_splitline}${str_title_start}${font_fail_start}$(translate "Device Disconnected")${font_fail_end}${str_title_end}"
-		elif echo "$title" | grep -q "$(translate "disconnected")"; then
-			title="${name} ${title}"
-			content_title=""
-		else
-			title="$(translate "Device Status Changed")"
-			content_title="${str_splitline}${str_title_start}${font_fail_start}$(translate "Device Disconnected")${font_fail_end}${str_title_end}"
-		fi
+		# 同一轮已经有设备断开的话，沿用同一个小标题，不再重复
+		content_title="${str_splitline}${str_title_start}${font_fail_start}$(translate "Device Disconnected")${font_fail_end}${str_title_end}"
+		grep -q '^offline ' "${dir}/title_stat" 2>/dev/null && content_title=""
+		title_event offline "$name"
+		title=$(title_compose)
 
 		content="${content}\
 ${content_title}\

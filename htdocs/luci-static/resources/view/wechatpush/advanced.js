@@ -302,6 +302,10 @@ return view.extend({
 	o.placeholder = '300';
 	o.description = _('How often traffic is sampled and compared against the limits. A shorter interval makes the reported time (from start of counting to exceeding the limit) more precise.');
 
+	o = s.option(form.Flag, 'log_scan', _('Log every scan (debug)'));
+	o.default = o.disabled;
+	o.description = _('When enabled, every scan run is written to the log (one short line per scan) and the log keeps up to 3000 lines. When disabled, scans are only logged at startup and when their state changes. Requires "Enable Logging".');
+
 	o = s.option(form.Value, 'client_usage_fresh_time', _('New connection guard period (s)'));
 	o.datatype = 'uinteger';
 	o.placeholder = '300';

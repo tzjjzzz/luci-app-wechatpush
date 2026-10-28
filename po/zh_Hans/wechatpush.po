@@ -1354,7 +1354,7 @@ msgid "/ (Homepage login)"
 msgstr "/ (首页登录)"
 
 msgid "%s frequent %s login attempts, blocked"
-msgstr "%s 频繁尝试 %s 登录，已封禁"
+msgstr "%s %s 登录已封禁"
 
 msgid "Frequent Login Attempts Information"
 msgstr "频繁尝试登录信息"
@@ -1677,6 +1677,141 @@ msgstr "初始化完成"
 msgid "Start running..."
 msgstr "开始运行..."
 
+msgid "%s connects"
+msgstr "%s 连接"
+
+msgid "%s disconnects"
+msgstr "%s 断开"
+
+msgid "%s connected to WireGuard"
+msgstr "%s 连接 WireGuard"
+
+msgid "%s disconnected from WireGuard"
+msgstr "%s 断开 WireGuard"
+
+msgid "%s connected to WiFi"
+msgstr "%s 连接 WiFi"
+
+msgid "%s logged in via %s"
+msgstr "%s 通过 %s 登录"
+
+msgid "%s up %s down %s"
+msgstr "%s上传%s 下载%s"
+
+msgid "%s up %s"
+msgstr "%s上传%s"
+
+msgid "%s down %s"
+msgstr "%s下载%s"
+
+msgid "Restarted"
+msgstr "重启"
+
+msgid "IPv4 changed"
+msgstr "IPv4 变化"
+
+msgid "IPv6 changed"
+msgstr "IPv6 变化"
+
+msgid "CPU temperature too high %s°C"
+msgstr "CPU 温度过高 %s°C"
+
+msgid "CPU load too high %s"
+msgstr "CPU 负载过高 %s"
+
+msgid "Device alert"
+msgstr "设备报警"
+
+msgid "%s traffic alerts"
+msgstr "%s 流量异常"
+
+msgid "%s up"
+msgstr "%s 连接"
+
+msgid "%s down"
+msgstr "%s 断开"
+
+msgid "%s notices"
+msgstr "%s 通知"
+
+msgid "Device status changed (%s)"
+msgstr "设备状态变化（%s）"
+
+msgid ", "
+msgstr "、"
+
+msgid "; "
+msgstr "；"
+
+msgid "%s %s WireGuard endpoint changed"
+msgstr "%s %s WireGuard 端点变化"
+
+msgid "%s WiFi auth failed %s/%s"
+msgstr "%s WiFi 认证失败 %s/%s"
+
+msgid "%s WiFi auth failed, ban not in effect"
+msgstr "%s WiFi 认证失败 封禁未生效"
+
+msgid "%s WiFi banned"
+msgstr "%s WiFi 已封禁"
+
+msgid "Router status"
+msgstr "路由状态"
+
+msgid "Send test"
+msgstr "发送测试"
+
+msgid "Scanning online devices"
+msgstr "扫描在线设备"
+
+msgid "Scanning network and IP changes"
+msgstr "扫描网络与 IP 变动"
+
+msgid "Scanning CPU load and temperature"
+msgstr "扫描 CPU 负载与温度"
+
+msgid "Scanning unattended tasks"
+msgstr "扫描无人值守任务"
+
+msgid "Scanning WireGuard interfaces(%s): %s active"
+msgstr "扫描 WireGuard 接口(%s)：活跃 %s 个"
+
+msgid "Scanning WireGuard interfaces, every %s s"
+msgstr "扫描 WireGuard 接口，间隔 %s 秒"
+
+msgid "Scanning abnormal traffic(%s): %s devices"
+msgstr "扫描异常流量(%s)：%s 台设备"
+
+msgid "Scanning abnormal traffic(%s), every %s s"
+msgstr "扫描异常流量(%s)，间隔 %s 秒"
+
+msgid "Fetching device info(%s)"
+msgstr "抓取设备信息(%s)"
+
+msgid "Fetching device info(%s), every %s s"
+msgstr "抓取设备信息(%s)，间隔 %s 秒"
+
+msgid "Logging every scan is enabled (debug)"
+msgstr "已开启记录每次扫描（调试）"
+
+msgid "Optical modem"
+msgstr "光猫"
+
+msgid "CPU temperature back to normal: %s"
+msgstr "CPU 温度恢复正常：%s"
+
+msgid "CPU load back to normal: %s"
+msgstr "CPU 负载恢复正常：%s"
+
+msgid "Log exceeded %s lines, keeping the last %s"
+msgstr "日志超过 %s 行，保留最近 %s 行"
+
+msgid "Log every scan (debug)"
+msgstr "记录每次扫描（调试）"
+
+msgid "When enabled, every scan run is written to the log (one short line per scan) and the log keeps up to 3000 lines. When disabled, scans are only logged at startup and when their state changes. Requires \"Enable Logging\"."
+msgstr "开启后，每次扫描都会在日志里记一行简短记录，日志最多保留 3000 行；关闭时，扫描只在启动时记一次，之后只记状态变化。需要先开启“启用日志”。"
+
 msgid "Loaded logs from previous restart"
 msgstr "载入上次重启前日志"
 
@@ -1732,13 +1867,13 @@ msgid "fail2ban-client not found, unable to monitor fail2ban bans"
 msgstr "未找到 fail2ban-client，无法监控 fail2ban 封禁事件"
 
 msgid "fail2ban banned %s (%s)"
-msgstr "fail2ban 封禁了 %s（%s）"
+msgstr "fail2ban封禁 %s（%s）"
 
 msgid "fail2ban Ban"
 msgstr "fail2ban 封禁"
 
 msgid "fail2ban unbanned %s (%s)"
-msgstr "fail2ban 解封了 %s（%s）"
+msgstr "fail2ban解封 %s（%s）"
 
 msgid "fail2ban Unban"
 msgstr "fail2ban 解封"
