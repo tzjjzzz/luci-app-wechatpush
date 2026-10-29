@@ -911,7 +911,7 @@ getname() {
 	local mac="$2"
 	local tmp_name
 	local oui_name
-	local name_width="20"
+	local name_width="${3-20}"
 	[ -z "$ip" ] && return 1
 	[ -z "$mac" ] && return 1
 
@@ -2164,8 +2164,9 @@ wg_endpoint_ip_changed() {
 }
 
 getwireguard() {
+	# 没勾选就什么都不做；只有打开"记录每次扫描（调试）"时才记一行
 	if [ -z "$wireguard_info_enable" ]; then
-		log_change "[DEBUG] $(translate "WireGuard discovery skipped: not enabled in device_info_helper")"
+		scan_log "$(translate "WireGuard discovery skipped: not enabled in device_info_helper")"
 		return
 	fi
 	# 独立的扫描间隔：没到时间就整体跳过，保留上一轮的 wireguard_iplist 和状态
@@ -2189,10 +2190,17 @@ getwireguard() {
 		[ -z "$wg_skip" ] && wireguard_interface="${wireguard_interface:+$wireguard_interface }${wg_one}"
 	done
 	if [ -z "$wireguard_interface" ]; then
-		log_change "[DEBUG] $(translate "WireGuard discovery skipped: no WireGuard interface found")"
+		# 已勾选却没发现接口：第一次记一条提示，之后只在调试开关打开时才重复记
+		if [ -z "$wg_none_logged" ]; then
+			log_change "[DEBUG] $(translate "WireGuard discovery skipped: no WireGuard interface found")"
+			wg_none_logged=1
+		else
+			scan_log "$(translate "WireGuard discovery skipped: no WireGuard interface found")"
+		fi
 		: >"${dir}/wireguard_state"
 		return
 	fi
+	wg_none_logged=""
 
 	local wg_handshake_fresh_seconds=300
 	# 扫描间隔拉长时，"最近有动静"的判定窗口也要跟着放宽，否则两次扫描之间会被误判成断开
@@ -2573,8 +2581,8 @@ ${str_title_start}${font_module_start}$(translate "Currently %d online devices, 
 		else
 			total=""
 		fi
-		name=$(getname "$ip" "$mac")
-		name=$(cut_str "$name" "12")
+		# 设备名放在最后一行，不用再截断
+		name=$(getname "$ip" "$mac" "")
 		time_up=$(jq -r --arg ip "$ip" '.devices[] | select(.ip == $ip) | .uptime' "$devices_json")
 		time_online=$(time_for_humans "$(( $(date +%s) - time_up ))")
 
@@ -2628,8 +2636,9 @@ ${str_title_start}${font_module_start}$(translate "Currently %d online devices, 
 	if [ "$has_usage" -eq 1 ]; then
 		header+=$(pad_field "$(translate "Total Traffic")" "$total_max")
 	fi
-	header+=$(pad_field "$(translate "Uptime")" "$time_online_max")
-	header+="$(translate "Client Name") MAC"
+	header+="$(translate "Uptime")"
+	header+="${str_linefeed}${str_tab}MAC"
+	header+="${str_linefeed}${str_tab}$(translate "Client Name")"
 
 	# 这部分内容会被部分推送渠道的 Markdown 解析当作代码块处理（因为每行都以固定空格开头），
 	# 代码块内不会渲染 HTML 标签（<font> 颜色标签会原样显示成文字），所以这里不用颜色，
@@ -2638,16 +2647,16 @@ ${str_title_start}${font_module_start}$(translate "Currently %d online devices, 
 	local row_divider="${str_linefeed}----------------------------------------"
 	content="${content}${explain}${header}${row_divider}"
 
-	# 内容：一台设备一行，MAC 直接跟在客户端名后面，前后各一条分隔线
+	# 内容：每台设备三行（IP 总流量 在线时间 / MAC / 客户端名），设备之间用分隔线隔开；客户端名放在最后，长一点也不会挤到别的列
 	for i in "${!ips[@]}"; do
 		local line="${str_linefeed}${str_tab}"
 		line+=$(pad_field "${ips[i]}" "$ip_max")
 		if [ "$has_usage" -eq 1 ]; then
 			line+=$(pad_field "${totals[i]}" "$total_max")
 		fi
-		line+=$(pad_field "${time_onlines[i]}" "$time_online_max")
-		line+="${names[i]}"
-		[ -n "${macs[i]}" ] && [ "${macs[i]}" != "unknown" ] && line+=" ${macs[i]}"
+		line+="${time_onlines[i]}"
+		[ -n "${macs[i]}" ] && [ "${macs[i]}" != "unknown" ] && line+="${str_linefeed}${str_tab}${macs[i]}"
+		line+="${str_linefeed}${str_tab}${names[i]}"
 		line+="${row_divider}"
 
 		content="${content}${line}"
