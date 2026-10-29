@@ -893,6 +893,10 @@ getmac() {
 	[ -f "${dir}/openwrt_arp" ] && mac=$(awk -v ip="$ip" '$1==ip {print $2; exit}' "${dir}/openwrt_arp")
 	process_and_check "$mac" && return
 
+	# ARP 里没有（比如条目已过期）时，再到其他 OpenWrt 的 DHCP 租约里按 IP 找
+	[ -f "${dir}/openwrt_leases" ] && mac=$(awk -v ip="$ip" '$1==ip {print $2; exit}' "${dir}/openwrt_leases")
+	process_and_check "$mac" && return
+
 	# 定时推送时不查询
 	[ -f "${dir}/send_pid" ] && echo "unknown" && return
 
@@ -953,6 +957,17 @@ getname() {
 	tmp_name=""
 	[ -f "/tmp/dhcp.leases" ] && tmp_name=$(awk -v ip="$ip" '$3==ip {print $4}' /tmp/dhcp.leases | head -n1)
 	[ "$tmp_name" == "*" ] && tmp_name=""
+	process_and_check "$tmp_name" "$name_width" "name" && return
+
+	# 其他 OpenWrt 的 DHCP 租约里设备自己通告的主机名（有线、无线、各个网段都有）：先按 MAC，其次按 IP
+	tmp_name=""
+	if [ -f "${dir}/openwrt_leases" ]; then
+		tmp_name=$(awk -v ip="$ip" -v mac="$(echo "$mac" | tr 'A-Z' 'a-z')" '
+			$3=="-" { next }
+			mac != "" && mac != "unknown" && tolower($2)==mac && m=="" { m=$3 }
+			$1==ip && i=="" { i=$3 }
+			END { print (m != "" ? m : i) }' "${dir}/openwrt_leases")
+	fi
 	process_and_check "$tmp_name" "$name_width" "name" && return
 
 	# 已保存的主机名（只在设备自己没有通告名字时才用：它可能是以前从数据库查到的厂商名）
@@ -1980,6 +1995,7 @@ getopenwrt() {
 		# 初始化一个空数组（bash 数组）
 		local json_array=()
 		local arp_pairs=""
+		local lease_rows=""
 		for op_host_entry in $op_host_ips; do
 			local op_host_ip op_host_sshport
 			read -r op_host_ip op_host_sshport <<<"$(op_ssh_target "$op_host_entry")"
@@ -1987,6 +2003,10 @@ getopenwrt() {
 			local leases_info=$(op_ssh "$op_host_ip" "$op_host_sshport" "cat /tmp/dhcp.leases 2>/dev/null")
 			local arp_info=$(op_ssh "$op_host_ip" "$op_host_sshport" "cat /proc/net/arp | grep '0x[26]' | grep -v '^169.254.' | grep -v '^\$' | sort -u 2>/dev/null")
 			local openwrt_arp_iplist+="$(echo "$arp_info" | awk '{print $1}')"$'\n'
+			# 对方 DHCP 租约里的全部设备（IP MAC 主机名；没有通告主机名的记成 -）：有线设备、各个网段的设备都在里面，
+			# 不像下面的无线终端列表只有 Wi-Fi 用户；供 getmac / getname 在本机查不到时补全
+			lease_rows+="$(echo "$leases_info" | awk 'NF>=4 && $3 ~ /^[0-9.]+$/ {print $3, $2, ($4=="*" ? "-" : $4)}')"$'\n'
+			scan_log "$(translate "OpenWrt %s: %s leases, %s ARP entries" "$op_host_ip" "$(echo "$leases_info" | grep -c .)" "$(echo "$arp_info" | grep -c .)")"
 			# 记下对方 ARP 表里的 "IP MAC"（去掉全 0 的无效条目），供 getmac 在本机查不到时补全
 			arp_pairs+="$(echo "$arp_info" | awk 'NF>=4 && $4!="00:00:00:00:00:00" {print $1, $4}')"$'\n'
 
@@ -2045,6 +2065,7 @@ getopenwrt() {
 		echo "${json_array[@]}" | jq -s . > "${dir}/openwrt_info"
 		# 这次一条都没取到（比如 SSH 全部失败）就保留上一次的结果，不要用空文件覆盖
 		[ -n "$(echo "$arp_pairs" | grep -v '^$')" ] && echo "$arp_pairs" | grep -v '^$' | sort -u >"${dir}/openwrt_arp"
+		[ -n "$(echo "$lease_rows" | grep -v '^$')" ] && echo "$lease_rows" | grep -v '^$' | sort -u >"${dir}/openwrt_leases"
 		openwrt_iplist=$(jq -r '.[] | select(.ip != "unknown" and .ip != "") | .ip' "${dir}/openwrt_info")
 		openwrt_iplist+=$'\n'"$openwrt_arp_iplist"
 	else
@@ -3949,12 +3970,15 @@ diy_send() {
 
 	! jq "$type" ${3} >${tempjsonpath} && log_change "[ERROR] $(translate "type:{ } field format error after variable substitution, please check for unescaped special characters or syntax errors in type:{ } field")" && return 1
 
+	# 注意：声明和赋值必须分开写。"local x=$(命令)" 的返回值永远是 local 自己的 0，会把 curl 的失败吞掉，
+	# 推送失败（DNS 不通、超时等）日志里什么都看不到；分开写 $? 才是命令真实的返回值
+	local curl_response
 	if [[ "$diyurl" =~ ^https?:// ]]; then
 		[ -n "$proxy_address" ] && local proxy_cmd="-x $proxy_address"
-		local curl_response=$(run_with_tag curl $proxy_cmd --connect-timeout 30 --max-time 60 --retry 2 -X POST -H "$content_type" -d "$data" "${diyurl}")
+		curl_response=$(run_with_tag curl $proxy_cmd --connect-timeout 30 --max-time 60 --retry 2 -X POST -H "$content_type" -d "$data" "${diyurl}")
 	else
 		local command=$(jq -r '.command' ${3}) && local command=$(eval echo ${command})
-		local curl_response=$(run_with_tag jq -r "$command" "$data" | eval "$diyurl")
+		curl_response=$(run_with_tag jq -r "$command" "$data" | eval "$diyurl")
 	fi
 	local RETVAL=$?
 
