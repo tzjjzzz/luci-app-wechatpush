@@ -874,8 +874,11 @@ getmac() {
 
 	# 已保存的 MAC
 	mac=$(jq -r --arg ip "$ip" '.devices[] | select(.ip == $ip) | .mac' "$devices_json")
-	# 某些路由器中继模式，会导致 MAC 重复，如果是重复值，尝试重新获取
-	local mac_count=$(jq -r --arg mac "$mac" '.devices[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase)) | .mac' "$devices_json" | wc -l)
+	# 某些路由器中继模式，会导致 MAC 重复，如果是重复值，尝试重新获取。
+	# 只统计"同一个网段"里的重复：同一台设备同时在两个网段（比如 10 网段和 31 网段）各有一个 IP 是正常的，
+	# 保存的 MAC 是对的；以前把这种情况也当成重复，另一个网段又查不到，就变成了 unknown
+	local net=$(echo "$ip" | awk -F. 'NF==4 {print $1"."$2"."$3}')
+	local mac_count=$(jq -r --arg mac "$mac" --arg net "$net" '.devices[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase) and ($net == "" or ((.ip | split(".")[0:3] | join(".")) == $net))) | .mac' "$devices_json" | wc -l)
 	[ "$mac_count" -eq 1 ] && process_and_check "$mac" && return
 
 	# DHCP（按 IP 列精确匹配，只取第一条）
@@ -909,6 +912,29 @@ getmac() {
 	echo "unknown"
 }
 
+# 静态地址备注名：从 uci show dhcp 的 host 段里找，按 MAC（可以写多个）或 IP 匹配，取它的 name。
+# 先按 MAC 匹配：同一台设备在其他网段（没有做静态绑定的那个网段）也能拿到名字。
+# 参数: $1 IP  $2 MAC
+getstaticname() {
+	local ip="$1" mac="$(echo "$2" | tr 'A-Z' 'a-z')"
+	uci show dhcp 2>/dev/null | awk -v ip="$ip" -v mac="$mac" '
+		{
+			eq = index($0, "=")
+			if (eq == 0) next
+			key = substr($0, 1, eq - 1); val = substr($0, eq + 1)
+			gsub("\047", " ", val)
+			if (split(key, p, ".") != 3 || p[1] != "dhcp") next
+			if (p[3] == "name") { sub(/^ +/, "", val); sub(/ +$/, "", val); name[p[2]] = val }
+			else if (p[3] == "mac") macs[p[2]] = " " tolower(val) " "
+			else if (p[3] == "ip") ips[p[2]] = " " val " "
+		}
+		END {
+			if (mac != "" && mac != "unknown") for (s in name) if (index(macs[s], " " mac " ")) { m = name[s]; break }
+			if (ip != "") for (s in name) if (index(ips[s], " " ip " ")) { i = name[s]; break }
+			print (m != "" ? m : i)
+		}'
+}
+
 # 查询主机名
 getname() {
 	local ip="$1"
@@ -923,35 +949,15 @@ getname() {
 	tmp_name=$(cat "$device_aliases_path" 2>/dev/null | grep -i -Ew "^${ip}|^${mac}" | awk '{for(i=2; i<=NF; i++) printf $i " "; print ""}')
 	process_and_check "$tmp_name" "$name_width" "alias" && return
 
-	# 光猫
+	# 静态地址备注名（DHCP 静态租约里的 name，先按 MAC 再按 IP）
+	tmp_name=$(getstaticname "$ip" "$mac")
+	process_and_check "$tmp_name" "$name_width" "name" && return
+
+	# 光猫（登录光猫管理页，读它记录的设备名，按 IP 匹配）
 	[ -f "${dir}/gateway_info" ] && {
 		tmp_name=$(jq -r --arg ip "$ip" '.[] | select(.ip == $ip) | .name' "${dir}/gateway_info")
 		process_and_check "$tmp_name" "$name_width" "name" && return
 	}
-
-	# MikroTik
-	[ -f "${dir}/mikrotik_info" ] && {
-		tmp_name=$(jq -r --arg mac "$mac" '.[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase)) | .name' "${dir}/mikrotik_info")
-		process_and_check "$tmp_name" "$name_width" "name" && return
-	}
-
-	# MIWiFi
-	[ -f "${dir}/miwifi_info" ] && {
-		tmp_name=$(jq -r --arg ip "$ip" '.[] | select(.ip == $ip) | .name' "${dir}/miwifi_info")
-		process_and_check "$tmp_name" "$name_width" "name" && return
-	}
-
-	# openwrt
-	[ -f "${dir}/openwrt_info" ] && {
-		tmp_name=$(jq -r --arg mac "$mac" '.[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase)) | .name' "${dir}/openwrt_info")
-		process_and_check "$tmp_name" "$name_width" "name" && return
-	}
-
-	# 静态地址备注名
-	tmp_name=""
-	local dhcp_config=$(uci show dhcp | grep -i -w "${ip}\|${mac}" | sed -n 's/\(dhcp\..*\)\..*/\1/p')
-	[ -n "$dhcp_config" ] && tmp_name=$(uci get ${dhcp_config}.name)
-	process_and_check "$tmp_name" "$name_width" "name" && return
 
 	# DHCP 租约里设备自己通告的主机名（没有通告时租约里是 *）
 	tmp_name=""
@@ -969,6 +975,24 @@ getname() {
 			END { print (m != "" ? m : i) }' "${dir}/openwrt_leases")
 	fi
 	process_and_check "$tmp_name" "$name_width" "name" && return
+
+	# 其他 OpenWrt 的无线终端列表（按 MAC，只有 Wi-Fi 用户）
+	[ -f "${dir}/openwrt_info" ] && {
+		tmp_name=$(jq -r --arg mac "$mac" '.[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase)) | .name' "${dir}/openwrt_info")
+		process_and_check "$tmp_name" "$name_width" "name" && return
+	}
+
+	# MikroTik（按 MAC）
+	[ -f "${dir}/mikrotik_info" ] && {
+		tmp_name=$(jq -r --arg mac "$mac" '.[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase)) | .name' "${dir}/mikrotik_info")
+		process_and_check "$tmp_name" "$name_width" "name" && return
+	}
+
+	# MiWiFi（按 IP）
+	[ -f "${dir}/miwifi_info" ] && {
+		tmp_name=$(jq -r --arg ip "$ip" '.[] | select(.ip == $ip) | .name' "${dir}/miwifi_info")
+		process_and_check "$tmp_name" "$name_width" "name" && return
+	}
 
 	# 已保存的主机名（只在设备自己没有通告名字时才用：它可能是以前从数据库查到的厂商名）
 	tmp_name=$(jq -r --arg ip "$ip" --arg mac "$mac" '.devices[] | select(.ip == $ip and (.mac | ascii_downcase) == ($mac | ascii_downcase)) | .name' "$devices_json")
