@@ -1677,6 +1677,9 @@ msgstr "初始化完成"
 msgid "Start running..."
 msgstr "开始运行..."
 
+msgid "OpenWrt %s: %s leases, %s ARP entries"
+msgstr "OpenWrt %s：租约 %s 条，ARP %s 条"
+
 msgid "%s connects"
 msgstr "%s 连接"
 

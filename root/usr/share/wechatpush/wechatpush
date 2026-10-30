@@ -874,8 +874,11 @@ getmac() {
 
 	# 已保存的 MAC
 	mac=$(jq -r --arg ip "$ip" '.devices[] | select(.ip == $ip) | .mac' "$devices_json")
-	# 某些路由器中继模式，会导致 MAC 重复，如果是重复值，尝试重新获取
-	local mac_count=$(jq -r --arg mac "$mac" '.devices[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase)) | .mac' "$devices_json" | wc -l)
+	# 某些路由器中继模式，会导致 MAC 重复，如果是重复值，尝试重新获取。
+	# 只统计"同一个网段"里的重复：同一台设备同时在两个网段（比如 10 网段和 31 网段）各有一个 IP 是正常的，
+	# 保存的 MAC 是对的；以前把这种情况也当成重复，另一个网段又查不到，就变成了 unknown
+	local net=$(echo "$ip" | awk -F. 'NF==4 {print $1"."$2"."$3}')
+	local mac_count=$(jq -r --arg mac "$mac" --arg net "$net" '.devices[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase) and ($net == "" or ((.ip | split(".")[0:3] | join(".")) == $net))) | .mac' "$devices_json" | wc -l)
 	[ "$mac_count" -eq 1 ] && process_and_check "$mac" && return
 
 	# DHCP（按 IP 列精确匹配，只取第一条）
@@ -893,6 +896,10 @@ getmac() {
 	[ -f "${dir}/openwrt_arp" ] && mac=$(awk -v ip="$ip" '$1==ip {print $2; exit}' "${dir}/openwrt_arp")
 	process_and_check "$mac" && return
 
+	# ARP 里没有（比如条目已过期）时，再到其他 OpenWrt 的 DHCP 租约里按 IP 找
+	[ -f "${dir}/openwrt_leases" ] && mac=$(awk -v ip="$ip" '$1==ip {print $2; exit}' "${dir}/openwrt_leases")
+	process_and_check "$mac" && return
+
 	# 定时推送时不查询
 	[ -f "${dir}/send_pid" ] && echo "unknown" && return
 
@@ -905,13 +912,36 @@ getmac() {
 	echo "unknown"
 }
 
+# 静态地址备注名：从 uci show dhcp 的 host 段里找，按 MAC（可以写多个）或 IP 匹配，取它的 name。
+# 先按 MAC 匹配：同一台设备在其他网段（没有做静态绑定的那个网段）也能拿到名字。
+# 参数: $1 IP  $2 MAC
+getstaticname() {
+	local ip="$1" mac="$(echo "$2" | tr 'A-Z' 'a-z')"
+	uci show dhcp 2>/dev/null | awk -v ip="$ip" -v mac="$mac" '
+		{
+			eq = index($0, "=")
+			if (eq == 0) next
+			key = substr($0, 1, eq - 1); val = substr($0, eq + 1)
+			gsub("\047", " ", val)
+			if (split(key, p, ".") != 3 || p[1] != "dhcp") next
+			if (p[3] == "name") { sub(/^ +/, "", val); sub(/ +$/, "", val); name[p[2]] = val }
+			else if (p[3] == "mac") macs[p[2]] = " " tolower(val) " "
+			else if (p[3] == "ip") ips[p[2]] = " " val " "
+		}
+		END {
+			if (mac != "" && mac != "unknown") for (s in name) if (index(macs[s], " " mac " ")) { m = name[s]; break }
+			if (ip != "") for (s in name) if (index(ips[s], " " ip " ")) { i = name[s]; break }
+			print (m != "" ? m : i)
+		}'
+}
+
 # 查询主机名
 getname() {
 	local ip="$1"
 	local mac="$2"
 	local tmp_name
 	local oui_name
-	local name_width="20"
+	local name_width="${3-20}"
 	[ -z "$ip" ] && return 1
 	[ -z "$mac" ] && return 1
 
@@ -919,41 +949,50 @@ getname() {
 	tmp_name=$(cat "$device_aliases_path" 2>/dev/null | grep -i -Ew "^${ip}|^${mac}" | awk '{for(i=2; i<=NF; i++) printf $i " "; print ""}')
 	process_and_check "$tmp_name" "$name_width" "alias" && return
 
-	# 光猫
+	# 静态地址备注名（DHCP 静态租约里的 name，先按 MAC 再按 IP）
+	tmp_name=$(getstaticname "$ip" "$mac")
+	process_and_check "$tmp_name" "$name_width" "name" && return
+
+	# 光猫（登录光猫管理页，读它记录的设备名，按 IP 匹配）
 	[ -f "${dir}/gateway_info" ] && {
 		tmp_name=$(jq -r --arg ip "$ip" '.[] | select(.ip == $ip) | .name' "${dir}/gateway_info")
 		process_and_check "$tmp_name" "$name_width" "name" && return
 	}
-
-	# MikroTik
-	[ -f "${dir}/mikrotik_info" ] && {
-		tmp_name=$(jq -r --arg mac "$mac" '.[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase)) | .name' "${dir}/mikrotik_info")
-		process_and_check "$tmp_name" "$name_width" "name" && return
-	}
-
-	# MIWiFi
-	[ -f "${dir}/miwifi_info" ] && {
-		tmp_name=$(jq -r --arg ip "$ip" '.[] | select(.ip == $ip) | .name' "${dir}/miwifi_info")
-		process_and_check "$tmp_name" "$name_width" "name" && return
-	}
-
-	# openwrt
-	[ -f "${dir}/openwrt_info" ] && {
-		tmp_name=$(jq -r --arg mac "$mac" '.[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase)) | .name' "${dir}/openwrt_info")
-		process_and_check "$tmp_name" "$name_width" "name" && return
-	}
-
-	# 静态地址备注名
-	tmp_name=""
-	local dhcp_config=$(uci show dhcp | grep -i -w "${ip}\|${mac}" | sed -n 's/\(dhcp\..*\)\..*/\1/p')
-	[ -n "$dhcp_config" ] && tmp_name=$(uci get ${dhcp_config}.name)
-	process_and_check "$tmp_name" "$name_width" "name" && return
 
 	# DHCP 租约里设备自己通告的主机名（没有通告时租约里是 *）
 	tmp_name=""
 	[ -f "/tmp/dhcp.leases" ] && tmp_name=$(awk -v ip="$ip" '$3==ip {print $4}' /tmp/dhcp.leases | head -n1)
 	[ "$tmp_name" == "*" ] && tmp_name=""
 	process_and_check "$tmp_name" "$name_width" "name" && return
+
+	# 其他 OpenWrt 的 DHCP 租约里设备自己通告的主机名（有线、无线、各个网段都有）：先按 MAC，其次按 IP
+	tmp_name=""
+	if [ -f "${dir}/openwrt_leases" ]; then
+		tmp_name=$(awk -v ip="$ip" -v mac="$(echo "$mac" | tr 'A-Z' 'a-z')" '
+			$3=="-" { next }
+			mac != "" && mac != "unknown" && tolower($2)==mac && m=="" { m=$3 }
+			$1==ip && i=="" { i=$3 }
+			END { print (m != "" ? m : i) }' "${dir}/openwrt_leases")
+	fi
+	process_and_check "$tmp_name" "$name_width" "name" && return
+
+	# 其他 OpenWrt 的无线终端列表（按 MAC，只有 Wi-Fi 用户）
+	[ -f "${dir}/openwrt_info" ] && {
+		tmp_name=$(jq -r --arg mac "$mac" '.[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase)) | .name' "${dir}/openwrt_info")
+		process_and_check "$tmp_name" "$name_width" "name" && return
+	}
+
+	# MikroTik（按 MAC）
+	[ -f "${dir}/mikrotik_info" ] && {
+		tmp_name=$(jq -r --arg mac "$mac" '.[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase)) | .name' "${dir}/mikrotik_info")
+		process_and_check "$tmp_name" "$name_width" "name" && return
+	}
+
+	# MiWiFi（按 IP）
+	[ -f "${dir}/miwifi_info" ] && {
+		tmp_name=$(jq -r --arg ip "$ip" '.[] | select(.ip == $ip) | .name' "${dir}/miwifi_info")
+		process_and_check "$tmp_name" "$name_width" "name" && return
+	}
 
 	# 已保存的主机名（只在设备自己没有通告名字时才用：它可能是以前从数据库查到的厂商名）
 	tmp_name=$(jq -r --arg ip "$ip" --arg mac "$mac" '.devices[] | select(.ip == $ip and (.mac | ascii_downcase) == ($mac | ascii_downcase)) | .name' "$devices_json")
@@ -1980,6 +2019,7 @@ getopenwrt() {
 		# 初始化一个空数组（bash 数组）
 		local json_array=()
 		local arp_pairs=""
+		local lease_rows=""
 		for op_host_entry in $op_host_ips; do
 			local op_host_ip op_host_sshport
 			read -r op_host_ip op_host_sshport <<<"$(op_ssh_target "$op_host_entry")"
@@ -1987,6 +2027,10 @@ getopenwrt() {
 			local leases_info=$(op_ssh "$op_host_ip" "$op_host_sshport" "cat /tmp/dhcp.leases 2>/dev/null")
 			local arp_info=$(op_ssh "$op_host_ip" "$op_host_sshport" "cat /proc/net/arp | grep '0x[26]' | grep -v '^169.254.' | grep -v '^\$' | sort -u 2>/dev/null")
 			local openwrt_arp_iplist+="$(echo "$arp_info" | awk '{print $1}')"$'\n'
+			# 对方 DHCP 租约里的全部设备（IP MAC 主机名；没有通告主机名的记成 -）：有线设备、各个网段的设备都在里面，
+			# 不像下面的无线终端列表只有 Wi-Fi 用户；供 getmac / getname 在本机查不到时补全
+			lease_rows+="$(echo "$leases_info" | awk 'NF>=4 && $3 ~ /^[0-9.]+$/ {print $3, $2, ($4=="*" ? "-" : $4)}')"$'\n'
+			scan_log "$(translate "OpenWrt %s: %s leases, %s ARP entries" "$op_host_ip" "$(echo "$leases_info" | grep -c .)" "$(echo "$arp_info" | grep -c .)")"
 			# 记下对方 ARP 表里的 "IP MAC"（去掉全 0 的无效条目），供 getmac 在本机查不到时补全
 			arp_pairs+="$(echo "$arp_info" | awk 'NF>=4 && $4!="00:00:00:00:00:00" {print $1, $4}')"$'\n'
 
@@ -2045,6 +2089,7 @@ getopenwrt() {
 		echo "${json_array[@]}" | jq -s . > "${dir}/openwrt_info"
 		# 这次一条都没取到（比如 SSH 全部失败）就保留上一次的结果，不要用空文件覆盖
 		[ -n "$(echo "$arp_pairs" | grep -v '^$')" ] && echo "$arp_pairs" | grep -v '^$' | sort -u >"${dir}/openwrt_arp"
+		[ -n "$(echo "$lease_rows" | grep -v '^$')" ] && echo "$lease_rows" | grep -v '^$' | sort -u >"${dir}/openwrt_leases"
 		openwrt_iplist=$(jq -r '.[] | select(.ip != "unknown" and .ip != "") | .ip' "${dir}/openwrt_info")
 		openwrt_iplist+=$'\n'"$openwrt_arp_iplist"
 	else
@@ -2164,8 +2209,9 @@ wg_endpoint_ip_changed() {
 }
 
 getwireguard() {
+	# 没勾选就什么都不做；只有打开"记录每次扫描（调试）"时才记一行
 	if [ -z "$wireguard_info_enable" ]; then
-		log_change "[DEBUG] $(translate "WireGuard discovery skipped: not enabled in device_info_helper")"
+		scan_log "$(translate "WireGuard discovery skipped: not enabled in device_info_helper")"
 		return
 	fi
 	# 独立的扫描间隔：没到时间就整体跳过，保留上一轮的 wireguard_iplist 和状态
@@ -2189,10 +2235,17 @@ getwireguard() {
 		[ -z "$wg_skip" ] && wireguard_interface="${wireguard_interface:+$wireguard_interface }${wg_one}"
 	done
 	if [ -z "$wireguard_interface" ]; then
-		log_change "[DEBUG] $(translate "WireGuard discovery skipped: no WireGuard interface found")"
+		# 已勾选却没发现接口：第一次记一条提示，之后只在调试开关打开时才重复记
+		if [ -z "$wg_none_logged" ]; then
+			log_change "[DEBUG] $(translate "WireGuard discovery skipped: no WireGuard interface found")"
+			wg_none_logged=1
+		else
+			scan_log "$(translate "WireGuard discovery skipped: no WireGuard interface found")"
+		fi
 		: >"${dir}/wireguard_state"
 		return
 	fi
+	wg_none_logged=""
 
 	local wg_handshake_fresh_seconds=300
 	# 扫描间隔拉长时，"最近有动静"的判定窗口也要跟着放宽，否则两次扫描之间会被误判成断开
@@ -2573,8 +2626,8 @@ ${str_title_start}${font_module_start}$(translate "Currently %d online devices, 
 		else
 			total=""
 		fi
-		name=$(getname "$ip" "$mac")
-		name=$(cut_str "$name" "12")
+		# 设备名放在最后一行，不用再截断
+		name=$(getname "$ip" "$mac" "")
 		time_up=$(jq -r --arg ip "$ip" '.devices[] | select(.ip == $ip) | .uptime' "$devices_json")
 		time_online=$(time_for_humans "$(( $(date +%s) - time_up ))")
 
@@ -2628,8 +2681,9 @@ ${str_title_start}${font_module_start}$(translate "Currently %d online devices, 
 	if [ "$has_usage" -eq 1 ]; then
 		header+=$(pad_field "$(translate "Total Traffic")" "$total_max")
 	fi
-	header+=$(pad_field "$(translate "Uptime")" "$time_online_max")
-	header+="$(translate "Client Name") MAC"
+	header+="$(translate "Uptime")"
+	header+="${str_linefeed}${str_tab}MAC"
+	header+="${str_linefeed}${str_tab}$(translate "Client Name")"
 
 	# 这部分内容会被部分推送渠道的 Markdown 解析当作代码块处理（因为每行都以固定空格开头），
 	# 代码块内不会渲染 HTML 标签（<font> 颜色标签会原样显示成文字），所以这里不用颜色，
@@ -2638,16 +2692,16 @@ ${str_title_start}${font_module_start}$(translate "Currently %d online devices, 
 	local row_divider="${str_linefeed}----------------------------------------"
 	content="${content}${explain}${header}${row_divider}"
 
-	# 内容：一台设备一行，MAC 直接跟在客户端名后面，前后各一条分隔线
+	# 内容：每台设备三行（IP 总流量 在线时间 / MAC / 客户端名），设备之间用分隔线隔开；客户端名放在最后，长一点也不会挤到别的列
 	for i in "${!ips[@]}"; do
 		local line="${str_linefeed}${str_tab}"
 		line+=$(pad_field "${ips[i]}" "$ip_max")
 		if [ "$has_usage" -eq 1 ]; then
 			line+=$(pad_field "${totals[i]}" "$total_max")
 		fi
-		line+=$(pad_field "${time_onlines[i]}" "$time_online_max")
-		line+="${names[i]}"
-		[ -n "${macs[i]}" ] && [ "${macs[i]}" != "unknown" ] && line+=" ${macs[i]}"
+		line+="${time_onlines[i]}"
+		[ -n "${macs[i]}" ] && [ "${macs[i]}" != "unknown" ] && line+="${str_linefeed}${str_tab}${macs[i]}"
+		line+="${str_linefeed}${str_tab}${names[i]}"
 		line+="${row_divider}"
 
 		content="${content}${line}"
@@ -3940,12 +3994,15 @@ diy_send() {
 
 	! jq "$type" ${3} >${tempjsonpath} && log_change "[ERROR] $(translate "type:{ } field format error after variable substitution, please check for unescaped special characters or syntax errors in type:{ } field")" && return 1
 
+	# 注意：声明和赋值必须分开写。"local x=$(命令)" 的返回值永远是 local 自己的 0，会把 curl 的失败吞掉，
+	# 推送失败（DNS 不通、超时等）日志里什么都看不到；分开写 $? 才是命令真实的返回值
+	local curl_response
 	if [[ "$diyurl" =~ ^https?:// ]]; then
 		[ -n "$proxy_address" ] && local proxy_cmd="-x $proxy_address"
-		local curl_response=$(run_with_tag curl $proxy_cmd --connect-timeout 30 --max-time 60 --retry 2 -X POST -H "$content_type" -d "$data" "${diyurl}")
+		curl_response=$(run_with_tag curl $proxy_cmd --connect-timeout 30 --max-time 60 --retry 2 -X POST -H "$content_type" -d "$data" "${diyurl}")
 	else
 		local command=$(jq -r '.command' ${3}) && local command=$(eval echo ${command})
-		local curl_response=$(run_with_tag jq -r "$command" "$data" | eval "$diyurl")
+		curl_response=$(run_with_tag jq -r "$command" "$data" | eval "$diyurl")
 	fi
 	local RETVAL=$?
 
