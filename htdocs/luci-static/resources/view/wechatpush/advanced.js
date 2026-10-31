@@ -14,36 +14,37 @@ return view.extend({
 		method: 'getHostHints',
 		expect: { '': {} }
 	}),
-	
-    load: function() {
-        return Promise.all([
-            this.callHostHints(),
-            rpc.call('file', 'read', { path: '/proc/net/arp' })
-                .then(function(res) {
-                    return res.data || '';
-                })
-                .catch(function(err) {
-                    console.error('Failed to read ARP:', err);
-                    return '';
-                }),
-            network.getNetworks()
-        ]);
-    },
+	load: function () {
+		return Promise.all([
+			this.callHostHints(),
+			network.getNetworks()
+		]);
+	},
 
-	parseArp: function (data) {
-		var lines = data.split('\n'),
-			hosts = [];
+	parseHostHints: function (data) {
+		var hosts = [];
 
-		for (var i = 1; i < lines.length; i++) {
-			var columns = lines[i].replace(/ +/g, ' ').split(' ');
+		Object.keys(data || {}).forEach(function (mac) {
+			var hint = data[mac] || {},
+				ipaddrs = hint.ipaddrs || hint.ipv4 || [];
 
-			if (columns.length >= 6) {
-				hosts.push({
-					ip: columns[0],
-					mac: columns[3]
-				});
-			}
-		}
+			if (!Array.isArray(ipaddrs))
+				ipaddrs = [ ipaddrs ];
+
+			ipaddrs.forEach(function (ip) {
+				var octets = (typeof(ip) === 'string' && /^\d{1,3}(\.\d{1,3}){3}$/.test(ip))
+					? ip.split('.').map(Number) : [];
+
+				if (octets.length === 4 && octets.every(function (octet) {
+					return octet >= 0 && octet <= 255;
+				})) {
+					hosts.push({
+						ip: ip,
+						mac: mac
+					});
+				}
+			});
+		});
 
 		// Sort hosts array by IP address
 		hosts.sort(function (a, b) {
@@ -71,9 +72,8 @@ return view.extend({
 	},
 
 	render: function (data) {
-		var arpData = data[1],
-			hosts = this.parseArp(arpData),
-			lanNets = (data[2] || []).filter(function (net) {
+		var hosts = this.parseHostHints(data[0]),
+			lanNets = (data[1] || []).filter(function (net) {
 				var name = net.getName();
 				return name && name !== 'loopback' && !/^wan/i.test(name);
 			}),
