@@ -55,7 +55,7 @@ read_config() {
 		"unattended_enable" "zerotier_helper" "unattended_only_on_disturb_time" "unattended_device_aliases" "network_disconnect_event" "unattended_autoreboot_mode" "autoreboot_system_uptime" "autoreboot_network_uptime" \
 		"device_info_helper" "gateway_host_url" "gateway_info_url" "gateway_logout_url" "gateway_username_id" "gateway_password_id" "gateway_username" "gateway_password" "miwifi_ip" "miwifi_password" "mikrotik_ip" "mikrotik_username" "op_host_ips" "scan_ip_range" "device_info_helper_sleeptime" \
 		"lan_interface" "wireguard_exclude" \
-		"usage_backend" "bandix_api_host" "bandix_api_port" "log_scan" "client_usage_fresh_time" "client_usage_fresh_tolerance" \
+		"usage_backend" "bandix_api_host" "bandix_api_port" "hide_device_mode" "hide_device_list" "log_scan" "client_usage_fresh_time" "client_usage_fresh_tolerance" \
 		"font_title" "font_success" "font_fail" "font_client" "font_module" \
 		"fail2ban_enable"
 
@@ -2356,9 +2356,61 @@ wireguard_send() {
 
 
 # 在线设备列表
+# 隐藏设备：命中隐藏列表的设备不进设备列表、不推送上线/下线、不参与流量报警，「在线设备」页也看不到。
+# hide_device_mode: mac=只比对 MAC / ip=只比对 IP / both=MAC 或 IP 任一命中；hide_device_list: MAC 或 IPv4 地址列表
+# 登录、WireGuard、WiFi 这几类事件的推送不受影响（它们不是按设备列表产生的）
+hide_device_load() {
+	hide_macs=""; hide_ips=""
+	case "$hide_device_mode" in mac | ip | both) ;; *) return 1 ;; esac
+	[ -z "$hide_device_list" ] && return 1
+	local item
+	for item in $hide_device_list; do
+		case "$item" in
+			*:*) [ "$hide_device_mode" != "ip" ] && hide_macs="${hide_macs:+$hide_macs }$(echo "$item" | tr 'A-Z' 'a-z')" ;;
+			*.*) [ "$hide_device_mode" != "mac" ] && hide_ips="${hide_ips:+$hide_ips }$item" ;;
+		esac
+	done
+	[ -n "$hide_macs$hide_ips" ]
+}
+
+# 参数: $1 IP  $2 MAC（可以为空）。返回 0=应隐藏
+is_hidden_device() {
+	[ -n "$hide_ips" ] && case " $hide_ips " in *" $1 "*) return 0 ;; esac
+	if [ -n "$hide_macs" ] && [ -n "$2" ]; then
+		case " $hide_macs " in *" $(echo "$2" | tr 'A-Z' 'a-z') "*) return 0 ;; esac
+	fi
+	return 1
+}
+
+# 按 IP 快速找 MAC（不走 getmac 里那一长串 jq）：本机 ARP、其他 OpenWrt 的 ARP / 租约、已保存的设备
+hide_mac_of_ip() {
+	local ip="$1" mac
+	mac=$(awk -v ip="$ip" '$1==ip && $4 != "00:00:00:00:00:00" {print $4; exit}' /proc/net/arp 2>/dev/null)
+	[ -z "$mac" ] && [ -f "${dir}/openwrt_arp" ] && mac=$(awk -v ip="$ip" '$1==ip {print $2; exit}' "${dir}/openwrt_arp")
+	[ -z "$mac" ] && [ -f "${dir}/openwrt_leases" ] && mac=$(awk -v ip="$ip" '$1==ip {print $2; exit}' "${dir}/openwrt_leases")
+	[ -z "$mac" ] && mac=$(jq -r --arg ip "$ip" '[.devices[] | select(.ip == $ip) | .mac | select(. != null and . != "unknown" and . != "")] | first // empty' "$devices_json" 2>/dev/null)
+	echo "$mac"
+}
+
+# 把已经记录的、现在命中隐藏列表的设备从设备列表里删掉（否则它们会被当成"离线"推送）
+hide_device_purge() {
+	local macs_json ips_json
+	macs_json=$(printf '%s\n' $hide_macs | jq -R . | jq -s .)
+	ips_json=$(printf '%s\n' $hide_ips | jq -R . | jq -s .)
+	local match='((((.mac // "") | ascii_downcase) as $x | ($m | index($x))) != null) or (((.ip // "") as $y | ($i | index($y))) != null)'
+	local n=$(jq --argjson m "$macs_json" --argjson i "$ips_json" "[.devices[] | select($match)] | length" "$devices_json" 2>/dev/null)
+	[ -z "$n" ] || [ "$n" -eq 0 ] && return 0
+	silent_run LockFile lock
+	jq --argjson m "$macs_json" --argjson i "$ips_json" ".devices |= map(select(($match) | not))" "$devices_json" >"$tmp_devices_json" && mv "$tmp_devices_json" "$devices_json"
+	silent_run LockFile unlock
+	log_change "[INFO] $(translate "Hidden devices removed from the device list: %s" "$n")"
+}
+
 first() {
 	# 注：此处为后台任务，无法操作父进程变量，故每个线程结束后都必须保存变量到文件
 	# 耗时太长，定时推送不再检查
+	# 隐藏设备：先把已记录且命中隐藏列表的设备删掉，避免它们被当成离线推送
+	hide_device_load && hide_device_purge
 	local IPLIST=$(jq -r '.devices[] | select(.status == "online" or .status == "unknown") | .ip' "$devices_json" | sort -u)
 	[ ! -f "${dir}/send_pid" ] && getgateway
 	[ ! -f "${dir}/send_pid" ] && getmiwifi
@@ -2409,6 +2461,8 @@ first() {
 	local IPLIST=$(echo "$IPLIST" | grep -v "^$" | sort -u)
 	for ip in $IPLIST; do
 		[ -n "$passive_mode" ] && [ "$passive_mode" -eq "1" ] && break
+		# 命中隐藏列表的设备不进入设备列表（只比对 IP 时不用查 MAC）
+		[ -n "$hide_ips$hide_macs" ] && is_hidden_device "$ip" "$([ -n "$hide_macs" ] && hide_mac_of_ip "$ip")" && continue
 		# 获取一个令牌
 		read -u 5
 		{

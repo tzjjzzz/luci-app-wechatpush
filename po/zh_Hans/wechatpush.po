@@ -1677,6 +1677,39 @@ msgstr "初始化完成"
 msgid "Start running..."
 msgstr "开始运行..."
 
+msgid "Hide Devices"
+msgstr "隐藏设备"
+
+msgid "Hide mode"
+msgstr "隐藏方式"
+
+msgid "Hide by MAC"
+msgstr "按 MAC 隐藏"
+
+msgid "Hide by IP"
+msgstr "按 IP 隐藏"
+
+msgid "Hide by MAC or IP"
+msgstr "按 MAC 或 IP 隐藏"
+
+msgid "Devices whose MAC address is in the list are hidden"
+msgstr "MAC 地址在列表里的设备会被隐藏"
+
+msgid "Devices whose IP address is in the list are hidden"
+msgstr "IP 地址在列表里的设备会被隐藏"
+
+msgid "A device is hidden when either its MAC address or its IP address is in the list"
+msgstr "MAC 地址或 IP 地址任意一个在列表里，该设备就会被隐藏"
+
+msgid "Hidden device list"
+msgstr "隐藏设备列表"
+
+msgid "Enter MAC addresses (AA:BB:CC:DD:EE:FF) or IPv4 addresses. Hidden devices do not appear in the device list or push messages, are not notified when they go online or offline, are not checked for abnormal traffic, and are not shown on the online devices page. Login, WireGuard and WiFi event notifications are not affected. In \"MAC\" mode IP entries are ignored, and in \"IP\" mode MAC entries are ignored."
+msgstr "填写 MAC 地址（AA:BB:CC:DD:EE:FF）或 IPv4 地址。被隐藏的设备不会出现在设备列表和推送消息里，上线、下线不通知，不参与异常流量检测，「在线设备」页也看不到。登录、WireGuard、WiFi 事件的通知不受影响。「按 MAC」模式下列表里的 IP 会被忽略，「按 IP」模式下列表里的 MAC 会被忽略。"
+
+msgid "Hidden devices removed from the device list: %s"
+msgstr "已从设备列表中移除被隐藏的设备：%s 台"
+
 msgid "OpenWrt %s: %s leases, %s ARP entries"
 msgstr "OpenWrt %s：租约 %s 条，ARP %s 条"
 
