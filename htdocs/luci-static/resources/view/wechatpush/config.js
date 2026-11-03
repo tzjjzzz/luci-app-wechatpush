@@ -125,6 +125,31 @@ return view.extend({
 		s.tab('ipset', _('Auto Ban'));
 		s.tab('crontab', _('Scheduled Push'));
 		s.tab('disturb', _('Do Not Disturb'));
+
+		// 隐藏设备
+		s.tab('hide', _('Hide Devices'));
+		o = s.taboption('hide', cbiRichListValue, 'hide_device_mode', _('Hide mode'));
+		o.value('', _('Close'),
+			_(' '));
+		o.value('mac', _('Hide by MAC'),
+			_('Devices whose MAC address is in the list are hidden'));
+		o.value('ip', _('Hide by IP'),
+			_('Devices whose IP address is in the list are hidden'));
+		o.value('both', _('Hide by MAC or IP'),
+			_('A device is hidden when either its MAC address or its IP address is in the list'));
+
+		o = s.taboption('hide', form.DynamicList, 'hide_device_list', _('Hidden device list'));
+		o.datatype = 'or(macaddr,ip4addr)';
+		o.rmempty = true;
+		o.depends('hide_device_mode', 'mac');
+		o.depends('hide_device_mode', 'ip');
+		o.depends('hide_device_mode', 'both');
+		o.description = _('Enter MAC addresses (AA:BB:CC:DD:EE:FF) or IPv4 addresses. Hidden devices do not appear in the device list or push messages, are not notified when they go online or offline, are not checked for abnormal traffic, and are not shown on the online devices page. Login, WireGuard and WiFi event notifications are not affected. In "MAC" mode IP entries are ignored, and in "IP" mode MAC entries are ignored.');
+		Object.keys(hosts || {}).sort().forEach(function (mac) {
+			var h = hosts[mac] || {}, name = h.name ? ' (' + h.name + ')' : '';
+			o.value(mac, mac + name);
+			(h.ipaddrs || []).forEach(function (ip) { o.value(ip, ip + name); });
+		});
 		s.addremove = false;
 		s.anonymous = true;
 
