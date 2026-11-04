@@ -1677,6 +1677,18 @@ msgstr "初始化完成"
 msgid "Start running..."
 msgstr "开始运行..."
 
+msgid "(%s)"
+msgstr "（%s）"
+
+msgid "Interface Remarks"
+msgstr "接口备注"
+
+msgid "Use the format interface=remark without spaces, for example br-guest=guest"
+msgstr "请按 接口名=备注 的格式填写，不要有空格，例如 br-guest=访客"
+
+msgid "Give interfaces a friendly name, one per line in the form interface=remark, for example br-lan=Main or br-guest=Guest (an underscore in the remark is shown as a space). The remark is added after the device name in the titles of connect, disconnect and abnormal traffic notifications, and shown in the message body. Interfaces without a remark are shown by their own name."
+msgstr "给接口起个好认的名字，一行一条，格式 接口名=备注，例如 br-lan=主网络、br-guest=访客（备注里的下划线会显示成空格）。备注会加在设备连接、断开、流量异常通知标题里设备名的后面，并显示在消息正文里；没有写备注的接口显示接口本身的名字。"
+
 msgid "OpenWrt %s: %s leases, %s ARP entries"
 msgstr "OpenWrt %s：租约 %s 条，ARP %s 条"
 
@@ -1736,9 +1748,6 @@ msgstr "%s 断开"
 
 msgid "%s notices"
 msgstr "%s 通知"
-
-msgid "Device status changed (%s)"
-msgstr "设备状态变化（%s）"
 
 msgid ", "
 msgstr "、"
