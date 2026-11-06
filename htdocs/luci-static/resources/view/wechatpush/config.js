@@ -376,6 +376,18 @@ return view.extend({
 		o = s.taboption('basic', form.Value, 'device_name', _('Device Name'));
 		o.description = _('The device name will be displayed in the push message title to identify the source device of the message.');
 
+		o = s.taboption('basic', form.DynamicList, 'interface_remarks', _('Interface Remarks'));
+		o.placeholder = 'br-guest=guest';
+		o.rmempty = true;
+		o.validate = function (section_id, value) {
+			var vals = Array.isArray(value) ? value : [value];
+			for (var i = 0; i < vals.length; i++)
+				if (vals[i] && !/^[^\s=]+=[^\s=]+$/.test(vals[i]))
+					return _('Use the format interface=remark without spaces, for example br-guest=guest');
+			return true;
+		};
+		o.description = _('Give interfaces a friendly name, one per line in the form interface=remark, for example br-lan=Main or br-guest=Guest (an underscore in the remark is shown as a space). The remark is added after the device name in the titles of connect, disconnect and abnormal traffic notifications, and shown in the message body. Interfaces without a remark are shown by their own name.');
+
 		o = s.taboption('basic', form.Value, 'sleeptime', _('Check Interval (s)'));
 		o.rmempty = false;
 		o.placeholder = '60';

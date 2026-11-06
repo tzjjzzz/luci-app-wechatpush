@@ -43,7 +43,7 @@ wait_and_cat() {
 # 初始化设置信息
 read_config() {
 	get_config \
-		"enable" "lite_enable" "device_name" "proxy_address" "sleeptime" "oui_data" "reset_regularly" "debuglevel" "lang" \
+		"enable" "lite_enable" "device_name" "interface_remarks" "proxy_address" "sleeptime" "oui_data" "reset_regularly" "debuglevel" "lang" \
 		"jsonpath" "sckey" "sc3key" "sc3uid" "sc3tags" "corpid" "userid" "agentid" "corpsecret" "mediapath" "wxpusher_apptoken" "wxpusher_uids" "wxpusher_topicIds" "pushplus_token" "wpush_apikey" "tg_api_server" "tg_token" "tg_chat_id" "tg_thread_id" "recipient_email" "smtp_host" "smtp_port" "smtp_tls" "smtp_starttls" "smtp_user" "smtp_passwordeval" "smtp_from" "smtp_from_full_name" \
 		"get_ipv4_mode" "ipv4_interface" "get_ipv6_mode" "ipv6_interface" \
 		"device_notification" "cpu_notification" "cpu_load_threshold" "temperature_threshold" \
@@ -632,6 +632,34 @@ named() {
 	[ -n "$device_name" ] && echo "$device_name $1" || echo "$1"
 }
 
+# 接口备注：interface_remarks 里每项是 "接口名=备注"（备注里的 _ 显示成空格），没有备注就显示接口名本身
+iface_label() {
+	local iface="$1" item
+	for item in $interface_remarks; do
+		[ "${item%%=*}" = "$iface" ] && { printf '%s' "${item#*=}" | tr -d '\000-\037\177' | tr '_' ' '; return; }
+	done
+	printf '%s' "$iface"
+}
+
+# 标题里设备名后面的括号，例如 (主网络)；接口未知时为空
+iface_suffix() {
+	case "$1" in "" | unknown) return ;; esac
+	printf '(%s)' "$(iface_label "$1")"
+}
+
+# 正文里的接口：有备注时是 "主网络 (br-lan)"，没有备注就是接口名本身
+iface_display() {
+	case "$1" in "" | unknown) return ;; esac
+	local l=$(iface_label "$1")
+	if [ "$l" = "$1" ]; then printf '%s' "$1"; else printf '%s (%s)' "$l" "$1"; fi
+}
+
+# 正文里的"网络接口"一行（接口未知时为空），用于断开、流量异常
+iface_body_line() {
+	local d=$(iface_display "$1")
+	[ -n "$d" ] && printf '%s' "${str_linefeed}${str_tab} - $(translate "Network Interface:")${str_space}${str_space}${str_space}${str_space}${str_space}${d}"
+}
+
 # 同一轮的多个事件合并成一个标题。计数写在 ${dir}/title_stat，每行: <类型> <数量> <文字>
 #   online 设备连接（文字=设备名列表）  offline 设备断开（同上）
 #   usage 流量异常（文字=组好的标题）   other 其他提醒（重启、IP 变化、CPU，文字=第一条的标题）
@@ -669,7 +697,7 @@ title_compose() {
 	[ "${on:-0}" -gt 0 ] && parts="${parts:+${parts}${sep}}$(translate "%s up" "$on")"
 	[ "${off:-0}" -gt 0 ] && parts="${parts:+${parts}${sep}}$(translate "%s down" "$off")"
 	[ "${ot:-0}" -gt 0 ] && parts="${parts:+${parts}${sep}}$(translate "%s notices" "$ot")"
-	named "$(translate "Device status changed (%s)" "$parts")"
+	named "$(translate "(%s)" "$parts")"
 }
 
 # 调试开关 log_scan 打开时，每次扫描都记一行
@@ -2600,7 +2628,7 @@ up() {
 			# 同一轮已经有设备连接的话，沿用同一个小标题，不再重复
 			local content_title="${str_title_start}${font_success_start}$(translate "New device connected")${font_success_end}${str_title_end}"
 			grep -q '^online ' "${dir}/title_stat" 2>/dev/null && content_title=""
-			title_event online "$name"
+			title_event online "${name}$(iface_suffix "$interface")"
 			local title=$(title_compose)
 
 			content="\
@@ -2609,7 +2637,7 @@ ${content_title}\
 ${str_linefeed}${str_tab} - $(translate "Client Name:")${str_space}${str_space}${str_space}${str_space}${str_space}${font_client_start}${name}${font_client_end}\
 ${str_linefeed}${str_tab} - $(translate "Client IP:")${str_space}${str_space}${str_space}${str_space}${ip}\
 ${str_linefeed}${str_tab} - $(translate "Client MAC:")${str_space}${str_space}${str_space}${str_space}${mac}\
-${str_linefeed}${str_tab} - $(translate "Network Interface:")${str_space}${str_space}${str_space}${str_space}${str_space}${interface}"
+${str_linefeed}${str_tab} - $(translate "Network Interface:")${str_space}${str_space}${str_space}${str_space}${str_space}$(iface_display "$interface")"
 
 			local up_dbm=$(get_signal_dbm "$mac")
 			[ -n "$up_dbm" ] && content="${content}\
@@ -3087,7 +3115,8 @@ get_client_usage() {
 				local time1=$(time_for_humans $(expr $(date +%s) - ${time_up}))
 
 				# 标题：本台设备的单独标题和多台合并时用的片段；最终标题在循环结束后统一生成
-				usage_frags+=("${ip_name} $(usage_title_body)")
+				local usage_iface=$(jq -r --arg ip "$ip" '[.devices[] | select(.ip == $ip) | .interface][0] // empty' "$devices_json")
+				usage_frags+=("${ip_name}$(iface_suffix "$usage_iface") $(usage_title_body)")
 				usage_n=$((usage_n + 1))
 				local content_title="${str_splitline}${str_title_start}${font_fail_start}$(translate "Device abnormal traffic")${font_fail_end}${str_title_end}"
 
@@ -3113,7 +3142,7 @@ get_client_usage() {
 ${content_title}\
 ${str_linefeed}${str_tab} - $(translate "Client Name:")${str_space}${str_space}${str_space}${str_space}${str_space}${font_client_start}${ip_name}${font_client_end}\
 ${str_linefeed}${str_tab} - $(translate "Client IP:")${str_space}${str_space}${str_space}${str_space}${ip}\
-${str_linefeed}${str_tab} - $(translate "Client MAC:")${str_space}${str_space}${str_space}${str_space}${mac}${ip_total}\
+${str_linefeed}${str_tab} - $(translate "Client MAC:")${str_space}${str_space}${str_space}${str_space}${mac}$(iface_body_line "$usage_iface")${ip_total}\
 ${detail}\
 ${str_linefeed}${str_tab} - $(translate "Uptime:")${str_space}${str_space}${str_space}${str_space}${time1}${detail_dbm}"
 
@@ -4417,14 +4446,15 @@ down_send() {
 		# 同一轮已经有设备断开的话，沿用同一个小标题，不再重复
 		content_title="${str_splitline}${str_title_start}${font_fail_start}$(translate "Device Disconnected")${font_fail_end}${str_title_end}"
 		grep -q '^offline ' "${dir}/title_stat" 2>/dev/null && content_title=""
-		title_event offline "$name"
+		local interface=$(jq -r --arg ip "$ip" '[.devices[] | select(.ip == $ip and .status == "offline") | .interface][0] // empty' "$devices_json")
+		title_event offline "${name}$(iface_suffix "$interface")"
 		title=$(title_compose)
 
 		content="${content}\
 ${content_title}\
 ${str_linefeed}${str_tab} - $(translate "Client Name:")${str_space}${str_space}${str_space}${str_space}${str_space}${font_client_start}${name}${font_client_end}\
 ${str_linefeed}${str_tab} - $(translate "Client IP:")${str_space}${str_space}${str_space}${str_space}${ip}\
-${str_linefeed}${str_tab} - $(translate "Client MAC:")${str_space}${str_space}${str_space}${str_space}${mac}${ip_total}\
+${str_linefeed}${str_tab} - $(translate "Client MAC:")${str_space}${str_space}${str_space}${str_space}${mac}$(iface_body_line "$interface")${ip_total}\
 ${str_linefeed}${str_tab} - $(translate "Uptime:")${str_space}${str_space}${str_space}${str_space}${time1}"
 
 		local down_dbm=$(get_signal_dbm "$mac")
