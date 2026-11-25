@@ -140,6 +140,14 @@ return view.extend({
 			});
 		};
 
+		o = s.option(form.ListValue, 'offline_detect_method', _('Offline detection method'));
+		o.widget = 'radio';
+		o.default = 'original';
+		o.value('original', _('Original (a device still listed by Wi-Fi counts as online)'));
+		o.value('probe', _('Active probe (idle Wi-Fi devices are probed, two failures mean offline)'));
+		o.description = _('Original: a device that is still in the Wi-Fi association list is treated as online. A phone that silently walks out of range stays listed until hostapd removes it (default 5 minutes).<br/>Active probe: a Wi-Fi device that has been silent for 30 seconds or more is probed with ARP (at most 2 packets, and at most once every 90 seconds per device). If the probe fails, it is repeated once after 8 seconds, and two failures mark the device offline right away, without waiting for the next scan cycle. In this mode the offline detection count is treated as at least 1.');
+		o.depends('passive_mode', '0');
+
 		o = s.option(form.Value, 'up_timeout', _('Device online detection timeout (s)'));
 		o.placeholder = "2"
 		o.optional = false

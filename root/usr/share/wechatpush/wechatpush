@@ -51,7 +51,7 @@ read_config() {
 		"login_notification" "wifi_auto_ban" "wifi_max_num" "wifi_ban_timeout" "wifi_ban_whitelist" "wifi_ban_sync" "wifi_ban_net" "login_max_num" "login_web_black" "login_ip_black_timeout" "block_blacklisted_forwarding" "login_ip_white_list" "port_knocking_enable" "login_ip_white_timeout" "login_port_white" "login_port_forward_list" \
 		"crontab_regular_time" "crontab_interval_time" \
 		"do_not_disturb_mode" "do_not_disturb_starttime" "do_not_disturb_endtime" "up_down_push_whitelist" "up_down_push_blacklist" "up_down_push_interface" "mac_online_list" "mac_offline_list" "cpu_threshold_duration" "cpu_notification_delay" "login_disturb" "login_notification_delay" "login_log_enable" \
-		"up_timeout" "down_timeout" "timeout_retry_count" "always_check_ip_list" "only_timeout_push" "passive_mode" "thread_num" "defaultSortColumn" "soc_code" "server_host" "server_port" \
+		"offline_detect_method" "up_timeout" "down_timeout" "timeout_retry_count" "always_check_ip_list" "only_timeout_push" "passive_mode" "thread_num" "defaultSortColumn" "soc_code" "server_host" "server_port" \
 		"unattended_enable" "zerotier_helper" "unattended_only_on_disturb_time" "unattended_device_aliases" "network_disconnect_event" "unattended_autoreboot_mode" "autoreboot_system_uptime" "autoreboot_network_uptime" \
 		"device_info_helper" "gateway_host_url" "gateway_info_url" "gateway_logout_url" "gateway_username_id" "gateway_password_id" "gateway_username" "gateway_password" "miwifi_ip" "miwifi_password" "mikrotik_ip" "mikrotik_username" "op_host_ips" "scan_ip_range" "device_info_helper_sleeptime" \
 		"lan_interface" "wireguard_exclude" \
@@ -267,6 +267,7 @@ init() {
 
 	# 文件清理
 	rm -f "${dir}/client_usage_reset" "${dir}/sheep_usage" "${dir}/old_sheep_usage" "${dir}/client_usage_aliases" "${dir}/old_client_usage_aliases" "/usr/share/wechatpush/errlog" "${dir}/temp_err" >/dev/null 2>&1
+	rm -f "${dir}"/probe_ok_* >/dev/null 2>&1
 	LockFile unlock
 
 	# 防火墙初始化
@@ -1219,17 +1220,51 @@ getping() {
 	local mac="$2"
 	local timeout="$3"
 	local retry_count="$4"
+	# 第 5 个参数为 1：使用"主动探测"离线检测方式（设置里 offline_detect_method=probe）。
+	# 不传或为空则完全保持原有行为。
+	local probe="$5"
+	local probe_cd_file=""
+	local arping_count=20 ping_count=5
 
 	local interface=$(getinterface "$ip" "$mac")
+	# 主动探测模式下先清空上一次的结果，避免同一个进程里连续调用两次时读到旧值
+	[ "$probe" = "1" ] && wlan_online=""
 	[ "$iw_version" ] && [ "$interface" ] && wlan_online=$(iw dev ${interface} station dump 2>/dev/null | grep -i -w "$mac" | grep Station) >/dev/null 2>&1
 	[ "$wlan_online" ] && {
-		silent_run LockFile lock
-		jq --arg ip "$ip" --arg parent "Local" \
-			'.devices |= map(if .ip == $ip and (.parent | . != $parent) then .parent = $parent else . end)' \
-			"$devices_json" > "$tmp_devices_json" && mv "$tmp_devices_json" "$devices_json"
-		silent_run LockFile unlock
-		return 0
+		local wlan_trusted=1
+		if [ "$probe" = "1" ]; then
+			# 主动探测：hostapd 对悄悄走出范围的设备要等约 5 分钟（ap_max_inactivity 默认 300 秒）才会移除，
+			# 所以关联列表里还有它，不代表真的在线。用 inactive time（最近一次收到该设备数据帧距今多久）判断：
+			#  - 小于 30 秒：设备刚刚还有数据，直接信任为在线，不额外发包
+			#  - 刚刚探测成功过（90 秒内）：同样信任，避免对休眠中的手机反复发包
+			#  - 否则：落到下面的 ARP 探测，探测成功才算在线
+			local inactive_ms cd_age
+			inactive_ms=$(iw dev "${interface}" station dump 2>/dev/null | awk -v mac="$mac" 'BEGIN{m=tolower(mac)} /^Station /{cur=(tolower($2)==m)} cur && /inactive time:/{print $3; exit}')
+			probe_cd_file="${dir}/probe_ok_$(echo "$mac" | tr -d ':' | tr 'A-Z' 'a-z')"
+			wlan_trusted=0
+			if [ -n "$inactive_ms" ] && [ "$inactive_ms" -lt 30000 ] 2>/dev/null; then
+				wlan_trusted=1
+			elif [ -f "$probe_cd_file" ]; then
+				cd_age=$(( $(date +%s) - $(date -r "$probe_cd_file" +%s 2>/dev/null || echo 0) ))
+				[ "$cd_age" -lt 90 ] && wlan_trusted=1
+			fi
+			# 探测用最少的包：arping 2 个、ping 2 个；"离线检测次数"在这个模式下至少按 1 次计
+			arping_count=2
+			ping_count=2
+			{ [ -z "$retry_count" ] || [ "$retry_count" -lt 1 ]; } 2>/dev/null && retry_count=1
+		fi
+		[ "$wlan_trusted" = "1" ] && {
+			silent_run LockFile lock
+			jq --arg ip "$ip" --arg parent "Local" \
+				'.devices |= map(if .ip == $ip and (.parent | . != $parent) then .parent = $parent else . end)' \
+				"$devices_json" > "$tmp_devices_json" && mv "$tmp_devices_json" "$devices_json"
+			silent_run LockFile unlock
+			return 0
+		}
 	}
+	# 只有"主动探测 + 设备在 Wi-Fi 关联列表里 + 需要探测"时才会在探测成功后写冷却标记
+	[ "$probe" = "1" ] && [ -z "$wlan_online" ] && probe_cd_file=""
+	[ "$probe" = "1" ] && [ "$retry_count" -lt 1 ] 2>/dev/null && retry_count=1
 
 	interface=$(cat /proc/net/arp | grep -w "$ip" | awk '{print $6}' | grep -v "^$" | sort -u | head -n1)
 	for i in $(seq 1 "$retry_count"); do
@@ -1238,16 +1273,19 @@ getping() {
 
 		# 避免无效的 arp 条目
 		if [ -n "$arp_entry_count" ] && [ "$arp_entry_count" -le 1 ]; then
-			ip_ms=$(run_with_tag arping -I "$interface" -c 20 -f -w "$timeout" "$ip" 2>/dev/null)
-			echo "$ip_ms" | grep -q "ms" && break || ip_ms=$(run_with_tag ping -c 5 -w 3 "$ip" 2>/dev/null | grep -v '100% packet loss')
+			ip_ms=$(run_with_tag arping -I "$interface" -c "$arping_count" -f -w "$timeout" "$ip" 2>/dev/null)
+			echo "$ip_ms" | grep -q "ms" && break || ip_ms=$(run_with_tag ping -c "$ping_count" -w 3 "$ip" 2>/dev/null | grep -v '100% packet loss')
 		else
-			ip_ms=$(run_with_tag ping -c 5 -w 3 "$ip" 2>/dev/null | grep -v '100% packet loss')
+			ip_ms=$(run_with_tag ping -c "$ping_count" -w 3 "$ip" 2>/dev/null | grep -v '100% packet loss')
 			echo "$ip_ms" | grep -q "ms" && break || ip neigh del "$ip" dev "$interface" 2>/dev/null # 清理无效条目
 		fi
 		sleep 1
 	done
 	unset i
 	echo "$ip_ms" | grep -q "ms"
+	local ping_rc=$?
+	[ "$ping_rc" -eq 0 ] && [ -n "$probe_cd_file" ] && touch "$probe_cd_file" 2>/dev/null
+	return $ping_rc
 }
 
 # CPU 占用率
@@ -2579,7 +2617,11 @@ up() {
 
 	jq -e --arg ip "$ip" '.devices[] | select(.ip == $ip and .status == "online") | .ip' "$devices_json" >/dev/null && return # 如果当前 IP 为在线，退出
 	local mac=$(getmac "$ip")
-	getping "$ip" "$mac" "$up_timeout" "1"
+	# 主动探测模式：设备列表里已有记录（离线/待验证）的 IP，复活前也要探测，
+	# 否则 Wi-Fi 关联列表里残留的旧记录会在刚判离线后又把它改回在线。全新设备保持原有的快速判断
+	local up_probe=""
+	[ "$offline_detect_method" = "probe" ] && jq -e --arg ip "$ip" '.devices[] | select(.ip == $ip)' "$devices_json" >/dev/null 2>&1 && up_probe="1"
+	getping "$ip" "$mac" "$up_timeout" "1" "$up_probe"
 	local ping_online=$?
 
 	# 连通
@@ -2663,14 +2705,24 @@ down() {
 	tmp_timeout=$down_timeout && tmp_retry_count=$timeout_retry_count
 	[ -n "$only_timeout_push" ] && blackwhitelist "$mac"
 	local ip_blackwhite=$? && [ "$ip_blackwhite" -ne "0" ] && tmp_timeout=10 && tmp_retry_count=2
-	getping "$ip" "$mac" "$tmp_timeout" "$tmp_retry_count"
+	local probe_flag="" probe_confirmed=""
+	[ "$offline_detect_method" = "probe" ] && probe_flag="1"
+	getping "$ip" "$mac" "$tmp_timeout" "$tmp_retry_count" "$probe_flag"
 	local ping_online=$?
+	# 主动探测模式：第一次探测失败后，隔几秒在同一轮里再探测一次；两次都失败就直接判离线，
+	# 不再等下一个扫描周期做二次确认（原方式是 online -> unknown -> 下一轮 offline）
+	if [ "$probe_flag" = "1" ] && [ "$ping_online" -eq "1" ]; then
+		sleep 8
+		getping "$ip" "$mac" "$tmp_timeout" "$tmp_retry_count" "$probe_flag"
+		ping_online=$?
+		[ "$ping_online" -eq "1" ] && probe_confirmed="1"
+	fi
 	silent_run LockFile lock
 
 	# 离线，置入待验证区
 	if [ "$ping_online" -eq "1" ]; then
-		# 修改为 unknown
-		if jq -e --arg ip "$ip" '.devices[] | select(.ip == $ip and .status == "online") | .ip' "$devices_json" >/dev/null; then
+		# 修改为 unknown（主动探测已连续两次失败时直接走下面的 offline）
+		if [ "$probe_confirmed" != "1" ] && jq -e --arg ip "$ip" '.devices[] | select(.ip == $ip and .status == "online") | .ip' "$devices_json" >/dev/null; then
 			jq --arg ip "$ip" '.devices |= map(if .ip == $ip then .status = "unknown" else . end)' "$devices_json" >"$tmp_devices_json" && mv "$tmp_devices_json" "$devices_json"
 		#这里其实无需再判断，只有 status == "online" 和 status == "unknown" 的设备会使用 down $ip
 		#elif jq -e --arg ip "$ip" '.devices[] | select(.ip == $ip and .status == "unknown") | .ip' "$devices_json" >/dev/null; then
