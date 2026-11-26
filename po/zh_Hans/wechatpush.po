@@ -928,12 +928,44 @@ msgid "Active probe"
 msgstr "主动探测"
 
 #: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/advanced.js
-msgid "Disable active detection: device online/offline events are no longer pushed. Suitable for users who are not sensitive to online devices but need other features.<br/>Original method: a device that is still in the Wi-Fi association list is treated as online. A phone that silently walks out of range stays listed until hostapd removes it (default 5 minutes).<br/>Active probe: a Wi-Fi device that has been silent for 30 seconds or more is probed with ARP (at most 2 packets, and at most once every 90 seconds per device). If the probe fails, it is repeated once after 8 seconds, and two failures mark the device offline right away, without waiting for the next scan cycle. In this mode the offline detection count is treated as at least 1."
-msgstr "关闭主动探测：设备上下线将不再提示。适用于对在线设备不敏感，但需要其他功能的用户。<br/>原有方式：设备只要还在 Wi-Fi 关联列表里就算在线。手机悄悄走出信号范围时，会一直留在列表里，直到 hostapd 把它移除（默认约 5 分钟）。<br/>主动探测：Wi-Fi 设备安静 30 秒以上时，用 ARP 探测一下（最多 2 个包，每台设备至少间隔 90 秒才会再探测）。探测失败后隔 8 秒再探测一次，连续两次失败就直接判离线，不再等下一个扫描周期。该模式下“离线检测次数”至少按 1 次计算。"
+msgid "Disable active detection: device online/offline events are no longer pushed. Suitable for users who are not sensitive to online devices but need other features.<br/>Original method: a device that is still in the Wi-Fi association list is treated as online. A phone that silently walks out of range stays listed until hostapd removes it (default 5 minutes).<br/>Active probe: a Wi-Fi device that has been silent for a while is probed with ARP (a few packets, with a cooldown per device). If the probe fails, it is repeated once after a short delay, and two failures mark the device offline right away, without waiting for the next scan cycle. The values can be adjusted below. In this mode the offline detection count is treated as at least 1."
+msgstr "关闭主动探测：设备上下线将不再提示。适用于对在线设备不敏感，但需要其他功能的用户。<br/>原有方式：设备只要还在 Wi-Fi 关联列表里就算在线。手机悄悄走出信号范围时，会一直留在列表里，直到 hostapd 把它移除（默认约 5 分钟）。<br/>主动探测：Wi-Fi 设备安静一段时间后，用 ARP 探测一下（只发少量包，每台设备有冷却时间）。探测失败后隔几秒再探测一次，连续两次失败就直接判离线，不再等下一个扫描周期。具体数值可在下面调整。该模式下“离线检测次数”至少按 1 次计算。"
 
 #: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/advanced.js
-msgid "Active probe: %s (%s) did not answer, retrying in 8 seconds"
-msgstr "主动探测：%s（%s）无应答，8 秒后重试"
+msgid "Probe: silent time before probing (s)"
+msgstr "探测：安静多久后才探测（秒）"
+
+#: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/advanced.js
+msgid "A Wi-Fi device that sent data within this many seconds is considered online without sending anything to it. Only devices silent for longer are probed."
+msgstr "Wi-Fi 设备在这个时间内有过数据往来，就直接当作在线，不会给它发任何包。只有安静超过这个时间的设备才会被探测。"
+
+#: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/advanced.js
+msgid "Probe: cooldown after a successful probe (s)"
+msgstr "探测：探测成功后的冷却时间（秒）"
+
+#: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/advanced.js
+msgid "After a device answers a probe, it is not probed again for this long and is treated as online. A longer cooldown means fewer packets to sleeping phones, but a device that leaves during the cooldown is noticed later. 0 disables the cooldown."
+msgstr "设备应答探测后，在这段时间内不再探测，直接当作在线。冷却越长，发给休眠手机的包越少，但设备在冷却期内离开会更晚被发现。填 0 表示不冷却。"
+
+#: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/advanced.js
+msgid "Probe: delay before the second probe (s)"
+msgstr "探测：第二次探测的间隔（秒）"
+
+#: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/advanced.js
+msgid "If a probe gets no answer, it is repeated once after this many seconds. Two failures mark the device offline right away."
+msgstr "探测无应答时，隔这么多秒再探测一次。连续两次失败就直接判离线。"
+
+#: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/advanced.js
+msgid "Probe: packets per probe"
+msgstr "探测：每次探测的包数"
+
+#: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/advanced.js
+msgid "Maximum number of ARP packets sent in one probe. More packets are more tolerant of phones in deep sleep, but wake them more often."
+msgstr "每次探测最多发送的 ARP 包数。包越多，对深度休眠的手机越宽容，但唤醒它们也越频繁。"
+
+#: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/advanced.js
+msgid "Active probe: %s (%s) did not answer, retrying in %s seconds"
+msgstr "主动探测：%s（%s）无应答，%s 秒后重试"
 
 #: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/advanced.js
 msgid "Active probe: %s (%s) failed twice, marked offline"

@@ -96,7 +96,7 @@ return view.extend({
 		o.value('passive', _('Disable active detection'));
 		o.value('original', _('Original method'));
 		o.value('probe', _('Active probe'));
-		o.description = _('Disable active detection: device online/offline events are no longer pushed. Suitable for users who are not sensitive to online devices but need other features.<br/>Original method: a device that is still in the Wi-Fi association list is treated as online. A phone that silently walks out of range stays listed until hostapd removes it (default 5 minutes).<br/>Active probe: a Wi-Fi device that has been silent for 30 seconds or more is probed with ARP (at most 2 packets, and at most once every 90 seconds per device). If the probe fails, it is repeated once after 8 seconds, and two failures mark the device offline right away, without waiting for the next scan cycle. In this mode the offline detection count is treated as at least 1.');
+		o.description = _('Disable active detection: device online/offline events are no longer pushed. Suitable for users who are not sensitive to online devices but need other features.<br/>Original method: a device that is still in the Wi-Fi association list is treated as online. A phone that silently walks out of range stays listed until hostapd removes it (default 5 minutes).<br/>Active probe: a Wi-Fi device that has been silent for a while is probed with ARP (a few packets, with a cooldown per device). If the probe fails, it is repeated once after a short delay, and two failures mark the device offline right away, without waiting for the next scan cycle. The values can be adjusted below. In this mode the offline detection count is treated as at least 1.');
 		o.cfgvalue = function (section_id) {
 			if (uci.get('wechatpush', section_id, 'passive_mode') == '1')
 				return 'passive';
@@ -181,6 +181,34 @@ return view.extend({
 		o.rmempty = false;
 		o.description = _("If the device has good signal strength and no Wi-Fi sleep issues, you can reduce the above values.<br/>Due to the mysterious nature of Wi-Fi sleep during the night, if you encounter frequent disconnections, please adjust the parameters accordingly.<br/>..╮(╯_╰）╭..")
 		o.depends('detect_mode', 'original');
+		o.depends('detect_mode', 'probe');
+
+		o = s.option(form.Value, 'probe_inactive_secs', _('Probe: silent time before probing (s)'));
+		o.rmempty = true;
+		o.placeholder = '30';
+		o.datatype = 'and(uinteger,range(5,600))';
+		o.description = _('A Wi-Fi device that sent data within this many seconds is considered online without sending anything to it. Only devices silent for longer are probed.');
+		o.depends('detect_mode', 'probe');
+
+		o = s.option(form.Value, 'probe_cooldown_secs', _('Probe: cooldown after a successful probe (s)'));
+		o.rmempty = true;
+		o.placeholder = '90';
+		o.datatype = 'and(uinteger,range(0,3600))';
+		o.description = _('After a device answers a probe, it is not probed again for this long and is treated as online. A longer cooldown means fewer packets to sleeping phones, but a device that leaves during the cooldown is noticed later. 0 disables the cooldown.');
+		o.depends('detect_mode', 'probe');
+
+		o = s.option(form.Value, 'probe_retry_delay', _('Probe: delay before the second probe (s)'));
+		o.rmempty = true;
+		o.placeholder = '8';
+		o.datatype = 'and(uinteger,range(1,60))';
+		o.description = _('If a probe gets no answer, it is repeated once after this many seconds. Two failures mark the device offline right away.');
+		o.depends('detect_mode', 'probe');
+
+		o = s.option(form.Value, 'probe_packets', _('Probe: packets per probe'));
+		o.rmempty = true;
+		o.placeholder = '2';
+		o.datatype = 'and(uinteger,range(1,5))';
+		o.description = _('Maximum number of ARP packets sent in one probe. More packets are more tolerant of phones in deep sleep, but wake them more often.');
 		o.depends('detect_mode', 'probe');
 
 		o = s.option(form.Flag, "only_timeout_push", _("Offline timeout applies only to the devices that receive push notifications"))

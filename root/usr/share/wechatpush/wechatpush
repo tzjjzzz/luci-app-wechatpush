@@ -51,7 +51,7 @@ read_config() {
 		"login_notification" "wifi_auto_ban" "wifi_max_num" "wifi_ban_timeout" "wifi_ban_whitelist" "wifi_ban_sync" "wifi_ban_net" "login_max_num" "login_web_black" "login_ip_black_timeout" "block_blacklisted_forwarding" "login_ip_white_list" "port_knocking_enable" "login_ip_white_timeout" "login_port_white" "login_port_forward_list" \
 		"crontab_regular_time" "crontab_interval_time" \
 		"do_not_disturb_mode" "do_not_disturb_starttime" "do_not_disturb_endtime" "up_down_push_whitelist" "up_down_push_blacklist" "up_down_push_interface" "mac_online_list" "mac_offline_list" "cpu_threshold_duration" "cpu_notification_delay" "login_disturb" "login_notification_delay" "login_log_enable" \
-		"offline_detect_method" "up_timeout" "down_timeout" "timeout_retry_count" "always_check_ip_list" "only_timeout_push" "passive_mode" "thread_num" "defaultSortColumn" "soc_code" "server_host" "server_port" \
+		"offline_detect_method" "probe_inactive_secs" "probe_cooldown_secs" "probe_retry_delay" "probe_packets" "up_timeout" "down_timeout" "timeout_retry_count" "always_check_ip_list" "only_timeout_push" "passive_mode" "thread_num" "defaultSortColumn" "soc_code" "server_host" "server_port" \
 		"unattended_enable" "zerotier_helper" "unattended_only_on_disturb_time" "unattended_device_aliases" "network_disconnect_event" "unattended_autoreboot_mode" "autoreboot_system_uptime" "autoreboot_network_uptime" \
 		"device_info_helper" "gateway_host_url" "gateway_info_url" "gateway_logout_url" "gateway_username_id" "gateway_password_id" "gateway_username" "gateway_password" "miwifi_ip" "miwifi_password" "mikrotik_ip" "mikrotik_username" "op_host_ips" "scan_ip_range" "device_info_helper_sleeptime" \
 		"lan_interface" "wireguard_exclude" \
@@ -1215,6 +1215,14 @@ check_http_access() {
 }
 
 # ping
+# 主动探测的数值参数：不是数字时用默认值，超出范围时取边界值。$1=填的值 $2=默认值 $3=最小 $4=最大
+probe_val() {
+	case "$1" in '' | *[!0-9]*) echo "$2"; return ;; esac
+	[ "$1" -lt "$3" ] && { echo "$3"; return; }
+	[ "$1" -gt "$4" ] && { echo "$4"; return; }
+	echo "$1"
+}
+
 getping() {
 	local ip="$1"
 	local mac="$2"
@@ -1235,22 +1243,25 @@ getping() {
 		if [ "$probe" = "1" ]; then
 			# 主动探测：hostapd 对悄悄走出范围的设备要等约 5 分钟（ap_max_inactivity 默认 300 秒）才会移除，
 			# 所以关联列表里还有它，不代表真的在线。用 inactive time（最近一次收到该设备数据帧距今多久）判断：
-			#  - 小于 30 秒：设备刚刚还有数据，直接信任为在线，不额外发包
-			#  - 刚刚探测成功过（90 秒内）：同样信任，避免对休眠中的手机反复发包
+			#  - 小于"安静多久后才探测"（默认 30 秒）：设备刚刚还有数据，直接信任为在线，不额外发包
+			#  - 刚刚探测成功过（冷却时间内，默认 90 秒）：同样信任，避免对休眠中的手机反复发包
 			#  - 否则：落到下面的 ARP 探测，探测成功才算在线
 			local inactive_ms cd_age
+			local p_inactive=$(probe_val "$probe_inactive_secs" 30 5 600)
+			local p_cooldown=$(probe_val "$probe_cooldown_secs" 90 0 3600)
+			local p_packets=$(probe_val "$probe_packets" 2 1 5)
 			inactive_ms=$(iw dev "${interface}" station dump 2>/dev/null | awk -v mac="$mac" 'BEGIN{m=tolower(mac)} /^Station /{cur=(tolower($2)==m)} cur && /inactive time:/{print $3; exit}')
 			probe_cd_file="${dir}/probe_ok_$(echo "$mac" | tr -d ':' | tr 'A-Z' 'a-z')"
 			wlan_trusted=0
-			if [ -n "$inactive_ms" ] && [ "$inactive_ms" -lt 30000 ] 2>/dev/null; then
+			if [ -n "$inactive_ms" ] && [ "$inactive_ms" -lt $((p_inactive * 1000)) ] 2>/dev/null; then
 				wlan_trusted=1
 			elif [ -f "$probe_cd_file" ]; then
 				cd_age=$(( $(date +%s) - $(date -r "$probe_cd_file" +%s 2>/dev/null || echo 0) ))
-				[ "$cd_age" -lt 90 ] && wlan_trusted=1
+				[ "$cd_age" -lt "$p_cooldown" ] && wlan_trusted=1
 			fi
-			# 探测用最少的包：arping 2 个、ping 2 个；"离线检测次数"在这个模式下至少按 1 次计
-			arping_count=2
-			ping_count=2
+			# 探测用尽量少的包（默认 2 个，可设置）；"离线检测次数"在这个模式下至少按 1 次计
+			arping_count="$p_packets"
+			ping_count="$p_packets"
 			{ [ -z "$retry_count" ] || [ "$retry_count" -lt 1 ]; } 2>/dev/null && retry_count=1
 		fi
 		[ "$wlan_trusted" = "1" ] && {
@@ -2713,8 +2724,9 @@ down() {
 	# 主动探测模式：第一次探测失败后，隔几秒在同一轮里再探测一次；两次都失败就直接判离线，
 	# 不再等下一个扫描周期做二次确认（原方式是 online -> unknown -> 下一轮 offline）
 	if [ "$probe_flag" = "1" ] && [ "$ping_online" -eq "1" ]; then
-		scan_log "$(translate "Active probe: %s (%s) did not answer, retrying in 8 seconds" "$ip" "$mac")"
-		sleep 8
+		local probe_delay=$(probe_val "$probe_retry_delay" 8 1 60)
+		scan_log "$(translate "Active probe: %s (%s) did not answer, retrying in %s seconds" "$ip" "$mac" "$probe_delay")"
+		sleep "$probe_delay"
 		getping "$ip" "$mac" "$tmp_timeout" "$tmp_retry_count" "$probe_flag"
 		ping_online=$?
 		[ "$ping_online" -eq "1" ] && probe_confirmed="1" && scan_log "$(translate "Active probe: %s (%s) failed twice, marked offline" "$ip" "$mac")"
