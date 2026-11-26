@@ -1231,13 +1231,23 @@ getping() {
 	# 第 5 个参数为 1：使用"主动探测"离线检测方式（设置里 offline_detect_method=probe）。
 	# 不传或为空则完全保持原有行为。
 	local probe="$5"
+	local hostapd_file="${dir}/hostapd_clients"
 	local probe_cd_file=""
 	local arping_count=20 ping_count=5
 
 	local interface=$(getinterface "$ip" "$mac")
 	# 主动探测模式下先清空上一次的结果，避免同一个进程里连续调用两次时读到旧值
 	[ "$probe" = "1" ] && wlan_online=""
-	[ "$iw_version" ] && [ "$interface" ] && wlan_online=$(iw dev ${interface} station dump 2>/dev/null | grep -i -w "$mac" | grep Station) >/dev/null 2>&1
+	if [ "$offline_detect_method" = "hostapd" ] && [ -f "${dir}/hostapd_clients.valid" ]; then
+		if [ -n "$mac" ] && [ "$mac" != "unknown" ] && grep -qi -x "$mac" "$hostapd_file"; then
+			wlan_online=1
+		elif [ -n "$interface" ] && [ -d "/sys/class/net/$interface/wireless" ]; then
+			# 已知无线设备不在 hostapd 授权客户端列表中时，立即视为离线。
+			return 1
+		fi
+	else
+		[ "$iw_version" ] && [ "$interface" ] && wlan_online=$(iw dev "$interface" station dump 2>/dev/null | grep -i -w "$mac" | grep Station) >/dev/null 2>&1
+	fi
 	[ "$wlan_online" ] && {
 		local wlan_trusted=1
 		if [ "$probe" = "1" ]; then
@@ -2195,7 +2205,9 @@ op_ssh() {
 getopenwrt() {
 	[ -z "$openwrt_info_enable" ] && return
 	local last_openwrt_time=$(file_date "${dir}/openwrt_info")
-	if [ "$last_openwrt_time" -ge "$device_info_helper_sleeptime" ]; then
+	local op_detect_mode_file="${dir}/openwrt_detect_mode"
+	local op_previous_detect_mode=$(cat "$op_detect_mode_file" 2>/dev/null)
+	if [ "$last_openwrt_time" -ge "$device_info_helper_sleeptime" ] || [ "$op_previous_detect_mode" != "$offline_detect_method" ]; then
 		scan_log "$(translate "Fetching device info(%s)" "OpenWrt")"
 		# 初始化一个空数组（bash 数组）
 		local json_array=()
@@ -2212,11 +2224,24 @@ cat /proc/net/arp | grep '0x[26]' | grep -v '^169.254.' | grep -v '^$' | sort -u
 for i in $(iw dev 2>/dev/null | grep Interface | awk '{print $2}'); do
 echo "@@IFACE $i"
 iw dev $i info 2>/dev/null
-echo "@@STA $i"
-iw dev $i station dump 2>/dev/null
+if [ '__DETECT_MODE__' = 'hostapd' ]; then
+	# 通过 hostapd ubus 对象遍历无线接口，输出已授权客户端 MAC。
+	:
+else
+	echo "@@STA $i"
+	iw dev "$i" station dump 2>/dev/null
+fi
 done
+if [ '__DETECT_MODE__' = 'hostapd' ]; then
+for obj in $(ubus list 'hostapd.*' 2>/dev/null); do
+	iface=${obj#hostapd.}
+	echo "@@STA $iface"
+	ubus call "$obj" get_clients 2>/dev/null | jq -r '.clients // {} | to_entries[] | select(.value.authorized == true) | .key'
+done
+fi
 EOS
 )
+		op_batch_cmd=${op_batch_cmd//__DETECT_MODE__/$offline_detect_method}
 		local -a op_hosts=() op_ports=()
 		local -a op_pid_list=()
 		local op_idx=0 op_waited=0 op_raw="${dir}/op_raw.$$" op_i
@@ -2243,7 +2268,7 @@ EOS
 		_op_section() { awk -v s="@@$2" '$0 == s {f = 1; next} /^@@/ {f = 0} f' "$1"; }
 		for ((op_i = 0; op_i < op_idx; op_i++)); do
 			local op_host_ip="${op_hosts[$op_i]}" op_host_sshport="${op_ports[$op_i]}" op_file="${op_raw}.${op_i}"
-			local wlan_interfaces=$(awk '/^@@IFACE /{print $2}' "$op_file")
+			local wlan_interfaces=$(awk '/^@@IFACE /{print $2} /^@@STA /{print $2}' "$op_file" | sort -u)
 			local leases_info=$(_op_section "$op_file" "LEASES")
 			local arp_info=$(_op_section "$op_file" "ARP")
 			local openwrt_arp_iplist+="$(echo "$arp_info" | awk '{print $1}')"$'\n'
@@ -2273,35 +2298,38 @@ EOS
 
 				# 逐行输出设备信息
 				while read -r line; do
-					if [[ "$line" =~ "Station" ]]; then
-						# 提取设备的MAC地址
-						local mac=$(echo "$line" | awk '{print $2}')
-
-						# 查找设备名称
-						local ip=$(echo "$arp_info" | awk -v mac="$mac" '$4 == mac {print $1; exit}')
-						[ -z "$ip" ] && local ip=$(jq -r --arg mac "$mac" '.devices[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase)) | .ip' "$devices_json")
-						local name=$(echo "$leases_info" | awk -v mac="$mac" '$2 == mac {print $4; exit}')
-						[ -z "$ip" ] && ip="unknown"
-						[ -z "$name" ] && name="unknown"
-
-						# 生成JSON格式的设备信息，并将其添加到数组中
-						local json_device=$(jq -n \
-							--arg ip "$ip" \
-							--arg name "$name" \
-							--arg mac "$mac" \
-							--arg parent "$op_host_ip" \
-							--arg type "$band" '
-							{
-								ip: $ip,
-								name: $name,
-								mac: $mac,
-								parent: $parent,
-								type: $type
-							}')
-
-						# 将生成的 JSON 设备信息添加到数组中
-						json_array+=("$json_device")
+					local mac=""
+					if [ "$offline_detect_method" = "hostapd" ]; then
+						echo "$line" | grep -qiE '^([[:xdigit:]]{2}:){5}[[:xdigit:]]{2}$' && mac="$line"
+					else
+						[[ "$line" =~ Station ]] && mac=$(echo "$line" | awk '{print $2}')
 					fi
+					[ -n "$mac" ] || continue
+
+					# 查找设备名称
+					local ip=$(echo "$arp_info" | awk -v mac="$mac" '$4 == mac {print $1; exit}')
+					[ -z "$ip" ] && ip=$(jq -r --arg mac "$mac" '.devices[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase)) | .ip' "$devices_json")
+					local name=$(echo "$leases_info" | awk -v mac="$mac" '$2 == mac {print $4; exit}')
+					[ -z "$ip" ] && ip="unknown"
+					[ -z "$name" ] && name="unknown"
+
+					# 生成JSON格式的设备信息，并将其添加到数组中
+					local json_device=$(jq -n \
+						--arg ip "$ip" \
+						--arg name "$name" \
+						--arg mac "$mac" \
+						--arg parent "$op_host_ip" \
+						--arg type "$band" '
+						{
+							ip: $ip,
+							name: $name,
+							mac: $mac,
+							parent: $parent,
+							type: $type
+						}')
+
+					# 将生成的 JSON 设备信息添加到数组中
+					json_array+=("$json_device")
 				done <<< "$devices"
 			done
 		done
@@ -2313,6 +2341,7 @@ EOS
 		[ -n "$(echo "$lease_rows" | grep -v '^$')" ] && echo "$lease_rows" | grep -v '^$' | sort -u >"${dir}/openwrt_leases"
 		openwrt_iplist=$(jq -r '.[] | select(.ip != "unknown" and .ip != "") | .ip' "${dir}/openwrt_info")
 		openwrt_iplist+=$'\n'"$openwrt_arp_iplist"
+		echo "$offline_detect_method" > "$op_detect_mode_file"
 	else
 		unset openwrt_iplist
 	fi
@@ -2603,6 +2632,28 @@ is_hidden_device() {
 	return 1
 }
 
+# 每轮扫描只读取一次本机所有 hostapd 客户端，供并发的在线/离线检测复用。
+refresh_hostapd_clients() {
+	local output="${dir}/hostapd_clients" tmp="${dir}/hostapd_clients.tmp" valid="${dir}/hostapd_clients.valid"
+	local objects=$(ubus list 'hostapd.*' 2>/dev/null) obj response object_count=0
+	rm -f "$valid"
+	[ -n "$objects" ] || return 1
+	: > "$tmp"
+	while IFS= read -r obj; do
+		[ -n "$obj" ] || continue
+		object_count=$((object_count + 1))
+		response=$(ubus call "$obj" get_clients 2>/dev/null) || { rm -f "$tmp"; return 1; }
+		echo "$response" | jq -e '.clients | type == "object"' >/dev/null 2>&1 || { rm -f "$tmp"; return 1; }
+		echo "$response" | jq -r '
+			.clients // {} | to_entries[] | select(.value.authorized == true) | .key
+		' >> "$tmp"
+	done <<< "$objects"
+	[ "$object_count" -gt 0 ] || { rm -f "$tmp"; return 1; }
+	sort -fu "$tmp" -o "$tmp"
+	mv "$tmp" "$output"
+	: > "$valid"
+}
+
 # 按 IP 快速找 MAC（不走 getmac 里那一长串 jq）：本机 ARP、其他 OpenWrt 的 ARP / 租约、已保存的设备
 hide_mac_of_ip() {
 	local ip="$1" mac
@@ -2633,6 +2684,9 @@ first() {
 	# 隐藏设备：先把已记录且命中隐藏列表的设备删掉，避免它们被当成离线推送
 	hide_device_load && hide_device_purge
 	local IPLIST=$(jq -r '.devices[] | select(.status == "online" or .status == "unknown") | .ip' "$devices_json" | sort -u)
+	if [ "$offline_detect_method" = "hostapd" ]; then
+		refresh_hostapd_clients
+	fi
 	[ ! -f "${dir}/send_pid" ] && getgateway
 	[ ! -f "${dir}/send_pid" ] && getmiwifi
 	[ ! -f "${dir}/send_pid" ] && getopenwrt
@@ -2795,6 +2849,13 @@ down() {
 	[ "$offline_detect_method" = "probe" ] && probe_flag="1"
 	getping "$ip" "$mac" "$tmp_timeout" "$tmp_retry_count" "$probe_flag"
 	local ping_online=$?
+	if [ "$offline_detect_method" = "hostapd" ]; then
+		local hostapd_iface=$(getinterface "$ip" "$mac")
+		if [ -f "${dir}/hostapd_clients.valid" ] && [ -n "$hostapd_iface" ] && [ -d "/sys/class/net/$hostapd_iface/wireless" ] && ! grep -qi -x "$mac" "${dir}/hostapd_clients" 2>/dev/null; then
+			# hostapd 已明确报告该无线设备离开，直接完成离线状态迁移。
+			probe_confirmed="1"
+		fi
+	fi
 	# 主动探测模式：第一次探测失败后，隔几秒在同一轮里再探测一次；两次都失败就直接判离线，
 	# 不再等下一个扫描周期做二次确认（原方式是 online -> unknown -> 下一轮 offline）
 	if [ "$probe_flag" = "1" ] && [ "$ping_online" -eq "1" ]; then
