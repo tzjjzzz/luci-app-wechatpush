@@ -259,6 +259,13 @@ return view.extend({
 		o.description = _('One device per line, each with its own SSH port: \"ip:port\" (IPv6: \"[addr]:port\"); without a port, 22 is used.<br/>') + _('echo -e "\\n" | ssh-keygen -t rsa -f /root/.ssh/id_rsa -N ""<br/>ssh root@your_openwrt_ip "mkdir -p /root/.ssh && chmod 700 /root/.ssh && echo $(cat /root/.ssh/id_rsa.pub) >> /etc/dropbear/authorized_keys && chmod 600 /etc/dropbear/authorized_keys"')
 		o.depends({ device_info_helper: "openwrt_info", '!contains': true });
 
+		o = s.option(form.Value, "op_ssh_timeout", _('OpenWrt SSH timeout (s)'));
+		o.rmempty = true;
+		o.placeholder = '10';
+		o.datatype = 'and(uinteger,range(3,120))';
+		o.description = _('Longest time one SSH connection to the OpenWrt devices above may take. A connection that exceeds it is retried once, and if it times out again the device is skipped for this round. All devices are fetched over one connection each, several at the same time, up to the "Maximum concurrent processes" setting.');
+		o.depends({ device_info_helper: "openwrt_info", '!contains': true });
+
 		o = s.option(form.Flag, "wifi_ban_sync", _('Sync WiFi bans to these OpenWrt devices'));
 		o.default = '1';
 		o.depends({ device_info_helper: "openwrt_info", '!contains': true });

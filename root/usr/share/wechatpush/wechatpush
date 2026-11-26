@@ -54,7 +54,7 @@ read_config() {
 		"up_timeout" "down_timeout" "timeout_retry_count" "always_check_ip_list" "only_timeout_push" "passive_mode" "thread_num" "defaultSortColumn" "soc_code" "server_host" "server_port" \
 		"unattended_enable" "zerotier_helper" "unattended_only_on_disturb_time" "unattended_device_aliases" "network_disconnect_event" "unattended_autoreboot_mode" "autoreboot_system_uptime" "autoreboot_network_uptime" \
 		"device_info_helper" "gateway_host_url" "gateway_info_url" "gateway_logout_url" "gateway_username_id" "gateway_password_id" "gateway_username" "gateway_password" "miwifi_ip" "miwifi_password" "mikrotik_ip" "mikrotik_username" "op_host_ips" "scan_ip_range" "device_info_helper_sleeptime" \
-		"lan_interface" "wireguard_exclude" \
+		"lan_interface" "wireguard_exclude" "op_ssh_timeout" \
 		"usage_backend" "bandix_api_host" "bandix_api_port" "hide_device_mode" "hide_device_list" "log_scan" "client_usage_fresh_time" "client_usage_fresh_tolerance" \
 		"font_title" "font_success" "font_fail" "font_client" "font_module" \
 		"fail2ban_enable"
@@ -2056,6 +2056,9 @@ op_ssh_target() {
 # 用法: op_ssh <host> <port> <远端命令>
 op_ssh() {
 	local host="$1" port="$2" cmd="$3" out rc id errf err fails="" key statef method methods pref tries has_timeout="" to_secs="${op_ssh_timeout:-10}"
+	# 设置里填的不是数字或小于 3 秒时，按默认 10 秒 / 最少 3 秒处理
+	case "$to_secs" in '' | *[!0-9]*) to_secs=10 ;; esac
+	[ "$to_secs" -lt 3 ] && to_secs=3
 	# dropbear 的 ssh 不认识 -o ConnectTimeout，连接卡住时要等系统 TCP 超时（约 127 秒）。
 	# 所以每次连接外面套一层 timeout 作硬超时；系统里没有 timeout 就保持原来的行为
 	command -v timeout >/dev/null 2>&1 && has_timeout="1"
@@ -2166,17 +2169,27 @@ done
 EOS
 )
 		local -a op_hosts=() op_ports=()
-		local op_pids="" op_idx=0 op_raw="${dir}/op_raw.$$" op_pid op_i
+		local -a op_pid_list=()
+		local op_idx=0 op_waited=0 op_raw="${dir}/op_raw.$$" op_i
+		# 同时在抓的旁路由数量不超过设置里的"最大并发进程数"（thread_num，没填或填 0 时按 5）
+		local op_limit="${thread_num:-5}"
+		case "$op_limit" in '' | *[!0-9]*) op_limit=5 ;; esac
+		[ "$op_limit" -lt 1 ] && op_limit=5
 		for op_host_entry in $op_host_ips; do
 			local op_host_ip op_host_sshport
 			read -r op_host_ip op_host_sshport <<<"$(op_ssh_target "$op_host_entry")"
+			# 已经满了就先等最早开始的那台抓完，再开下一台
+			if [ $((op_idx - op_waited)) -ge "$op_limit" ]; then
+				wait "${op_pid_list[$op_waited]}" 2>/dev/null
+				op_waited=$((op_waited + 1))
+			fi
 			op_hosts[$op_idx]="$op_host_ip"
 			op_ports[$op_idx]="$op_host_sshport"
 			op_ssh "$op_host_ip" "$op_host_sshport" "$op_batch_cmd" >"${op_raw}.${op_idx}" 2>/dev/null &
-			op_pids="$op_pids $!"
+			op_pid_list[$op_idx]=$!
 			op_idx=$((op_idx + 1))
 		done
-		for op_pid in $op_pids; do wait "$op_pid" 2>/dev/null; done
+		for ((op_i = op_waited; op_i < op_idx; op_i++)); do wait "${op_pid_list[$op_i]}" 2>/dev/null; done
 		# 从抓回来的文本里取出某一段：@@名称 之后、下一个 @@ 之前的内容
 		_op_section() { awk -v s="@@$2" '$0 == s {f = 1; next} /^@@/ {f = 0} f' "$1"; }
 		for ((op_i = 0; op_i < op_idx; op_i++)); do
