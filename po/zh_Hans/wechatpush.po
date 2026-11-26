@@ -2383,8 +2383,8 @@ msgstr "每轮设备扫描均读取 OpenWrt 的 hostapd 客户端列表"
 msgid "hostapd event listener"
 msgstr "hostapd 事件监听"
 
-msgid "Listen for hostapd connection events locally and on each selected OpenWrt AP over SSH. After a disconnect, wait three seconds and check all APs again for roaming. Active detection skips wired ARP/ping when upload counters increase."
-msgstr "监听本机 hostapd 的连接和断开事件，并通过 SSH 监听所选 OpenWrt 副路由。设备断开后等待 3 秒，再检查所有 AP 以确认是否发生漫游。主动检测时，有线设备上行字节增长就跳过本轮 ARP/ping。"
+msgid "Listen locally and over SSH on selected OpenWrt APs. A station event updates that client directly. Disconnect notifications allow about two seconds for roaming. Periodic snapshots recover missed events. Wired clients with increased upload counters skip ARP/ping."
+msgstr "监听本机和所选 OpenWrt 副路由（SSH）的 hostapd 事件，直接更新对应设备。断开后预留约 2 秒供设备漫游，再触发离线通知。定期核对关联列表以补回遗漏事件。有线设备上行字节增长时跳过 ARP/ping。"
 
 msgid "Listening for OpenWrt hostapd station events"
 msgstr "监听 OpenWrt 的 hostapd 连接和断开事件"
@@ -2398,8 +2398,11 @@ msgstr "hostapd %s %s：暂时离开，等待漫游确认"
 msgid "%s %s: upload counter increased, skipping ARP/ping"
 msgstr "%s %s：检测到上行字节增长，跳过本轮 ARP/ping"
 
-msgid "hostapd event %s %s; refreshing AP lists"
-msgstr "收到 hostapd 事件 %s %s，刷新所有 AP 的关联列表"
+msgid "hostapd %s/%s: %s %s (AP log: %s)"
+msgstr "hostapd 事件 %s/%s：%s %s（AP 日志时间 %s）"
 
 msgid "Could not open hostapd event pipe, polling on each scan"
 msgstr "hostapd 事件管道打开失败，已回退到每轮查询"
+
+msgid "hostapd notification: %s (quiet-mode result %s; 0 sends)"
+msgstr "hostapd 通知：%s（免打扰结果 %s，0 表示开始发送）"
