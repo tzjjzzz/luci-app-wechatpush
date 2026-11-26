@@ -2104,7 +2104,10 @@ op_ssh_target() {
 # 都没有可用的身份文件、也没法免密登录时，自然返回失败，调用方按原来的方式处理空结果
 # 用法: op_ssh <host> <port> <远端命令>
 op_ssh() {
-	local host="$1" port="$2" cmd="$3" out rc id errf err fails="" key statef method
+	local host="$1" port="$2" cmd="$3" out rc id errf err fails="" key statef method methods pref tries has_timeout="" to_secs="${op_ssh_timeout:-10}"
+	# dropbear 的 ssh 不认识 -o ConnectTimeout，连接卡住时要等系统 TCP 超时（约 127 秒）。
+	# 所以每次连接外面套一层 timeout 作硬超时；系统里没有 timeout 就保持原来的行为
+	command -v timeout >/dev/null 2>&1 && has_timeout="1"
 	# dropbear 的 ssh 不指定 -i 时，默认读 $HOME/.ssh/id_dropbear。插件由系统服务启动，环境里的 HOME 通常是 "/"
 	# （内核给 init 的默认值），于是找不到默认密钥，报 "No auth methods could be used"；
 	# 手动登录没问题是因为那时 HOME=/root。下面每次调用都显式带上 HOME=/root
@@ -2121,7 +2124,7 @@ op_ssh() {
 	_op_ssh_ok() {
 		method="$1"
 		if [ "$(cat "$statef" 2>/dev/null)" != "$method" ]; then
-			if [ -z "$fails" ]; then
+			if [ -z "$fails" ] || [ "$method" = "-" ]; then
 				log_change "[INFO] $(translate "SSH %s:%s login succeeded (no identity needed)" "$host" "$port")"
 			else
 				log_change "[INFO] $(translate "SSH %s:%s login succeeded with identity %s (earlier attempts failed and were skipped)" "$host" "$port" "$method")"
@@ -2130,25 +2133,53 @@ op_ssh() {
 		fi
 		rm -f "$errf" 2>/dev/null
 	}
-	out=$(HOME=/root run_with_tag ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o BatchMode=yes -p "$port" root@"$host" "$cmd" 2>"$errf")
-	rc=$?
-	if [ "$rc" -eq 0 ]; then
-		_op_ssh_ok "-"
-		echo "$out"; return 0
-	fi
-	err=$(_op_ssh_err "$errf")
-	fails="$(translate "SSH %s:%s (no identity) failed, rc=%s: %s" "$host" "$port" "$rc" "${err:-$(translate "no error output")}")"$'\n'
+	# 用指定的登录方式连一次（"-" 表示不指定 -i），结果放在 out / rc 里
+	_op_ssh_run() {
+		local -a args=(-o ConnectTimeout=5 -o StrictHostKeyChecking=no -o BatchMode=yes -p "$port")
+		[ "$1" != "-" ] && args+=(-i "$1")
+		args+=(root@"$host" "$cmd")
+		if [ -n "$has_timeout" ]; then
+			out=$(HOME=/root run_with_tag timeout "$to_secs" ssh "${args[@]}" 2>"$errf")
+		else
+			out=$(HOME=/root run_with_tag ssh "${args[@]}" 2>"$errf")
+		fi
+		rc=$?
+	}
+	# 登录方式的尝试顺序：上次成功的方式排第一，然后是"不指定密钥"，最后是 /root/.ssh/ 下实际存在的 id_* 私钥
+	# （不关心具体叫 id_rsa 还是 id_dropbear，有什么就试什么）
+	pref=$(cat "$statef" 2>/dev/null)
+	methods="${pref:+$pref }-"
 	for id in /root/.ssh/id_*; do
 		[ -f "$id" ] || continue
 		case "$id" in *.pub) continue ;; esac
-		out=$(HOME=/root run_with_tag ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o BatchMode=yes -p "$port" -i "$id" root@"$host" "$cmd" 2>"$errf")
-		rc=$?
-		if [ "$rc" -eq 0 ]; then
-			_op_ssh_ok "$id"
-			echo "$out"; return 0
-		fi
-		err=$(_op_ssh_err "$errf")
-		fails="${fails}$(translate "SSH %s:%s with identity %s failed, rc=%s: %s" "$host" "$port" "$id" "$rc" "${err:-$(translate "no error output")}")"$'\n'
+		methods="$methods $id"
+	done
+	methods=$(echo "$methods" | tr ' ' '\n' | awk 'NF && !seen[$0]++' | tr '\n' ' ')
+	for method in $methods; do
+		tries=0
+		while :; do
+			tries=$((tries + 1))
+			_op_ssh_run "$method"
+			if [ "$rc" -eq 0 ]; then
+				_op_ssh_ok "$method"
+				echo "$out"; return 0
+			fi
+			err=$(_op_ssh_err "$errf")
+			if [ "$method" = "-" ]; then
+				fails="${fails}$(translate "SSH %s:%s (no identity) failed, rc=%s: %s" "$host" "$port" "$rc" "${err:-$(translate "no error output")}")"$'\n'
+			else
+				fails="${fails}$(translate "SSH %s:%s with identity %s failed, rc=%s: %s" "$host" "$port" "$method" "$rc" "${err:-$(translate "no error output")}")"$'\n'
+			fi
+			# 超时（124 是 GNU timeout，busybox 可能是 137/143）：说明是连接卡住，不是认证问题。
+			# 同一种方式再试一次；再超时就认为这台暂时连不上，不再换密钥白等
+			case "$rc" in
+			124 | 137 | 143)
+				[ "$tries" -lt 2 ] && continue
+				break 2
+				;;
+			esac
+			break
+		done
 	done
 	# 所有方式都失败了才把每次的失败原因写进调试日志
 	echo "$fails" | grep -v '^$' | while IFS= read -r line; do log_change "[DEBUG] $line"; done
@@ -2167,12 +2198,41 @@ getopenwrt() {
 		local json_array=()
 		local arp_pairs=""
 		local lease_rows=""
+		# 每台旁路由只连一次 SSH，把租约、ARP、各无线接口的信息一次取回来（用 @@ 标记分段），
+		# 多台旁路由同时抓取，总耗时取决于最慢的一台，而不是把每台、每条命令挨个连一遍
+		local op_batch_cmd
+		op_batch_cmd=$(cat <<'EOS'
+echo '@@LEASES'
+cat /tmp/dhcp.leases 2>/dev/null
+echo '@@ARP'
+cat /proc/net/arp | grep '0x[26]' | grep -v '^169.254.' | grep -v '^$' | sort -u 2>/dev/null
+for i in $(iw dev 2>/dev/null | grep Interface | awk '{print $2}'); do
+echo "@@IFACE $i"
+iw dev $i info 2>/dev/null
+echo "@@STA $i"
+iw dev $i station dump 2>/dev/null
+done
+EOS
+)
+		local -a op_hosts=() op_ports=()
+		local op_pids="" op_idx=0 op_raw="${dir}/op_raw.$$" op_pid op_i
 		for op_host_entry in $op_host_ips; do
 			local op_host_ip op_host_sshport
 			read -r op_host_ip op_host_sshport <<<"$(op_ssh_target "$op_host_entry")"
-			local wlan_interfaces=$(op_ssh "$op_host_ip" "$op_host_sshport" 'iw dev 2>/dev/null | grep Interface | awk '\''{print $2}'\''')
-			local leases_info=$(op_ssh "$op_host_ip" "$op_host_sshport" "cat /tmp/dhcp.leases 2>/dev/null")
-			local arp_info=$(op_ssh "$op_host_ip" "$op_host_sshport" "cat /proc/net/arp | grep '0x[26]' | grep -v '^169.254.' | grep -v '^\$' | sort -u 2>/dev/null")
+			op_hosts[$op_idx]="$op_host_ip"
+			op_ports[$op_idx]="$op_host_sshport"
+			op_ssh "$op_host_ip" "$op_host_sshport" "$op_batch_cmd" >"${op_raw}.${op_idx}" 2>/dev/null &
+			op_pids="$op_pids $!"
+			op_idx=$((op_idx + 1))
+		done
+		for op_pid in $op_pids; do wait "$op_pid" 2>/dev/null; done
+		# 从抓回来的文本里取出某一段：@@名称 之后、下一个 @@ 之前的内容
+		_op_section() { awk -v s="@@$2" '$0 == s {f = 1; next} /^@@/ {f = 0} f' "$1"; }
+		for ((op_i = 0; op_i < op_idx; op_i++)); do
+			local op_host_ip="${op_hosts[$op_i]}" op_host_sshport="${op_ports[$op_i]}" op_file="${op_raw}.${op_i}"
+			local wlan_interfaces=$(awk '/^@@IFACE /{print $2}' "$op_file")
+			local leases_info=$(_op_section "$op_file" "LEASES")
+			local arp_info=$(_op_section "$op_file" "ARP")
 			local openwrt_arp_iplist+="$(echo "$arp_info" | awk '{print $1}')"$'\n'
 			# 对方 DHCP 租约里的全部设备（IP MAC 主机名；没有通告主机名的记成 -）：有线设备、各个网段的设备都在里面，
 			# 不像下面的无线终端列表只有 Wi-Fi 用户；供 getmac / getname 在本机查不到时补全
@@ -2184,7 +2244,7 @@ getopenwrt() {
 			# 遍历每个接口
 			for iface in $wlan_interfaces; do
 				# 获取接口信息
-				local info=$(op_ssh "$op_host_ip" "$op_host_sshport" "iw dev $iface info 2>/dev/null")
+				local info=$(_op_section "$op_file" "IFACE $iface")
 
 				# 获取频道和频段
 				local channel=$(echo "$info" | grep channel | awk '{print $2}')
@@ -2196,7 +2256,7 @@ getopenwrt() {
 				fi
 
 				# 获取连接的设备列表
-				local devices=$(op_ssh "$op_host_ip" "$op_host_sshport" "iw dev $iface station dump 2>/dev/null")
+				local devices=$(_op_section "$op_file" "STA $iface")
 
 				# 逐行输出设备信息
 				while read -r line; do
@@ -2232,6 +2292,7 @@ getopenwrt() {
 				done <<< "$devices"
 			done
 		done
+		rm -f "${op_raw}".* 2>/dev/null
 		# 使用 jq 输出最终的 JSON 数组
 		echo "${json_array[@]}" | jq -s . > "${dir}/openwrt_info"
 		# 这次一条都没取到（比如 SSH 全部失败）就保留上一次的结果，不要用空文件覆盖
