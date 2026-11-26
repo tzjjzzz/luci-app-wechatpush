@@ -1192,6 +1192,14 @@ msgstr "需要安装 wireguard-tools（wg 命令）。隧道接口不会产生 A
 msgid "IP range to be scanned"
 msgstr "需要扫描的 IP 段"
 
+#: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/advanced.js
+msgid "OpenWrt SSH timeout (s)"
+msgstr "OpenWrt SSH 超时（秒）"
+
+#: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/advanced.js
+msgid "Longest time one SSH connection to the OpenWrt devices above may take. A connection that exceeds it is retried once, and if it times out again the device is skipped for this round. All devices are fetched over one connection each, several at the same time, up to the \"Maximum concurrent processes\" setting."
+msgstr "单次 SSH 连接到上面这些 OpenWrt 的最长时间。超时会重试一次，再超时就跳过这台设备，本轮不再等待。每台设备只连一次，多台同时抓取，同时抓取的数量受“最大并发进程数”限制。"
+
 #: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/advanced.js:140
 msgid "Interval for capturing info"
 msgstr "抓取信息时间间隔"
