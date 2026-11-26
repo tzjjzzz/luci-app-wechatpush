@@ -87,10 +87,28 @@ return view.extend({
 		s.anonymous = true
 		s.addremove = false
 
-		o = s.option(form.Flag, "passive_mode", _("Disable active detection"))
-		o.default = 0
-		o.rmempty = true
-		o.description = _("Disable active detection of client online status. Enabling this feature will no longer prompt device online/offline events.<br/>Suitable for users who are not sensitive to online devices but need other features.")
+		// 合并后的单选项：关闭主动探测 / 原有方式 / 主动探测。
+		// 实际仍然保存为原来的两个 UCI 选项：passive_mode（关闭主动探测）和 offline_detect_method（original / probe）
+		o = s.option(form.ListValue, 'detect_mode', _('Online/offline detection'));
+		o.widget = 'radio';
+		o.default = 'original';
+		o.rmempty = false;
+		o.value('passive', _('Disable active detection'));
+		o.value('original', _('Original method'));
+		o.value('probe', _('Active probe'));
+		o.description = _('Disable active detection: device online/offline events are no longer pushed. Suitable for users who are not sensitive to online devices but need other features.<br/>Original method: a device that is still in the Wi-Fi association list is treated as online. A phone that silently walks out of range stays listed until hostapd removes it (default 5 minutes).<br/>Active probe: a Wi-Fi device that has been silent for 30 seconds or more is probed with ARP (at most 2 packets, and at most once every 90 seconds per device). If the probe fails, it is repeated once after 8 seconds, and two failures mark the device offline right away, without waiting for the next scan cycle. In this mode the offline detection count is treated as at least 1.');
+		o.cfgvalue = function (section_id) {
+			if (uci.get('wechatpush', section_id, 'passive_mode') == '1')
+				return 'passive';
+			return uci.get('wechatpush', section_id, 'offline_detect_method') == 'probe' ? 'probe' : 'original';
+		};
+		o.write = function (section_id, value) {
+			uci.set('wechatpush', section_id, 'passive_mode', value == 'passive' ? '1' : '0');
+			// 选择“关闭主动探测”时保留之前选的检测方式，切回来时不丢
+			if (value != 'passive')
+				uci.set('wechatpush', section_id, 'offline_detect_method', value);
+		};
+		o.remove = function () { };
 
 		o = s.option(form.Value, "thread_num", _('Maximum concurrent processes'))
 		o.placeholder = "3"
@@ -140,27 +158,21 @@ return view.extend({
 			});
 		};
 
-		o = s.option(form.ListValue, 'offline_detect_method', _('Offline detection method'));
-		o.widget = 'radio';
-		o.default = 'original';
-		o.value('original', _('Original (a device still listed by Wi-Fi counts as online)'));
-		o.value('probe', _('Active probe (idle Wi-Fi devices are probed, two failures mean offline)'));
-		o.description = _('Original: a device that is still in the Wi-Fi association list is treated as online. A phone that silently walks out of range stays listed until hostapd removes it (default 5 minutes).<br/>Active probe: a Wi-Fi device that has been silent for 30 seconds or more is probed with ARP (at most 2 packets, and at most once every 90 seconds per device). If the probe fails, it is repeated once after 8 seconds, and two failures mark the device offline right away, without waiting for the next scan cycle. In this mode the offline detection count is treated as at least 1.');
-		o.depends('passive_mode', '0');
-
 		o = s.option(form.Value, 'up_timeout', _('Device online detection timeout (s)'));
 		o.placeholder = "2"
 		o.optional = false
 		o.datatype = "uinteger"
 		o.rmempty = false;
-		o.depends('passive_mode', '0');
+		o.depends('detect_mode', 'original');
+		o.depends('detect_mode', 'probe');
 
 		o = s.option(form.Value, "down_timeout", _('Device offline detection timeout (s)'))
 		o.placeholder = "10"
 		o.optional = false
 		o.datatype = "uinteger"
 		o.rmempty = false;
-		o.depends('passive_mode', '0');
+		o.depends('detect_mode', 'original');
+		o.depends('detect_mode', 'probe');
 
 		o = s.option(form.Value, "timeout_retry_count", _('Offline detection count'))
 		o.placeholder = "2"
@@ -168,13 +180,15 @@ return view.extend({
 		o.datatype = "uinteger"
 		o.rmempty = false;
 		o.description = _("If the device has good signal strength and no Wi-Fi sleep issues, you can reduce the above values.<br/>Due to the mysterious nature of Wi-Fi sleep during the night, if you encounter frequent disconnections, please adjust the parameters accordingly.<br/>..╮(╯_╰）╭..")
-		o.depends('passive_mode', '0');
+		o.depends('detect_mode', 'original');
+		o.depends('detect_mode', 'probe');
 
 		o = s.option(form.Flag, "only_timeout_push", _("Offline timeout applies only to the devices that receive push notifications"))
 		o.default = 0
 		o.rmempty = true
 		o.description = _("When this option is selected, the offline timeout and offline detection count apply only to the devices that require push notifications. Other devices will use default values, which can significantly reduce the time required for detection. However, it may result in inaccurate online time displayed in the online devices list. It is recommended to enable this option only when there are many devices and frequent offline occurrences are observed for specific devices of interest.")
-		o.depends('passive_mode', '0');
+		o.depends('detect_mode', 'original');
+		o.depends('detect_mode', 'probe');
 
 		o = s.option(form.DynamicList, 'always_check_ip_list', _('IP address to always scan'));
 		o.datatype = 'ipaddr';
@@ -182,7 +196,8 @@ return view.extend({
 		hosts.forEach(function (host) {
 			o.value(host.ip, this.formatHostIPMAC(host));
 		}, this);
-		o.depends('passive_mode', '0');
+		o.depends('detect_mode', 'original');
+		o.depends('detect_mode', 'probe');
 
 		o = s.option(form.MultiValue, 'lan_interface', _('LAN interfaces to scan'));
 		lanNets.forEach(function (net) {
@@ -192,7 +207,8 @@ return view.extend({
 			o.value(name, label);
 		});
 		o.description = _('Select which network interfaces to scan for devices, e.g. the guest network. Leave empty to auto-detect all non-WAN interfaces.');
-		o.depends('passive_mode', '0');
+		o.depends('detect_mode', 'original');
+		o.depends('detect_mode', 'probe');
 
 		o = s.option(form.MultiValue, 'device_info_helper', _('Assist in obtaining device information'));
 		o.value('gateway_info', _('Retrieve hostname list from modem'));
@@ -203,7 +219,8 @@ return view.extend({
 		o.value('scan_local_ip', _('Scan local IP'));
 		o.modalonly = true;
 		o.description = _('When OpenWrt is used as a bypass gateway and cannot obtain device hostnames or a complete list of local network devices.<br/>the \"Retrieve hostname list from modem\" option has only been tested with HG5143F/HN8145V China Telecom gateways and may not be universally applicable.<br/>The \"Scan local IP\" option may not retrieve hostnames, so please use device name annotations in conjunction with it.');
-		o.depends('passive_mode', '0');
+		o.depends('detect_mode', 'original');
+		o.depends('detect_mode', 'probe');
 
 		o = s.option(form.Value, "gateway_host_url", _('Optical modem login URL'));
 		o.rmempty = true;

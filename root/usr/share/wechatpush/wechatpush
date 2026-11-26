@@ -2636,6 +2636,7 @@ up() {
 		# 如果是待二次离线检测 unknown 设备，json 文件中依然有信息，修改在线状态为 online
 		if [ "$mac" != "unknown" ] && jq -e --arg ip "$ip" --arg mac "$mac" '.devices[] | select(.ip == $ip and (.mac | ascii_downcase) == ($mac | ascii_downcase)) | .mac' "$devices_json" >/dev/null; then
 			jq --arg ip "$ip" --arg mac "$mac" '.devices |= map(if .ip == $ip then .mac = $mac | .status = "online" else . end)' "$devices_json" >"$tmp_devices_json" && mv "$tmp_devices_json" "$devices_json"
+			[ "$up_probe" = "1" ] && scan_log "$(translate "Active probe: %s (%s) answered again, back online" "$ip" "$mac")"
 		# up
 		else
 			# 剔除（重置）流量数据
@@ -2712,10 +2713,11 @@ down() {
 	# 主动探测模式：第一次探测失败后，隔几秒在同一轮里再探测一次；两次都失败就直接判离线，
 	# 不再等下一个扫描周期做二次确认（原方式是 online -> unknown -> 下一轮 offline）
 	if [ "$probe_flag" = "1" ] && [ "$ping_online" -eq "1" ]; then
+		scan_log "$(translate "Active probe: %s (%s) did not answer, retrying in 8 seconds" "$ip" "$mac")"
 		sleep 8
 		getping "$ip" "$mac" "$tmp_timeout" "$tmp_retry_count" "$probe_flag"
 		ping_online=$?
-		[ "$ping_online" -eq "1" ] && probe_confirmed="1"
+		[ "$ping_online" -eq "1" ] && probe_confirmed="1" && scan_log "$(translate "Active probe: %s (%s) failed twice, marked offline" "$ip" "$mac")"
 	fi
 	silent_run LockFile lock
 
