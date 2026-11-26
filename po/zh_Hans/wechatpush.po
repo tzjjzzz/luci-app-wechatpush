@@ -2359,8 +2359,8 @@ msgstr "hostapd %s %s：转 ARP/ping，上次 AP %s，快照不完整 %s"
 msgid "hostapd %s: %s interfaces, %s authorized clients"
 msgstr "hostapd %s：%s 个接口，%s 个已授权客户端"
 
-msgid "hostapd %s: incomplete SSH/ubus reply, using reachability checks for missing clients"
-msgstr "hostapd %s：SSH/ubus 查询不完整，缺失设备转 ARP/ping"
+msgid "hostapd %s: snapshot failed (%s), using ARP/ping"
+msgstr "hostapd %s：快照失败（%s），回退到 ARP/ping"
 
 msgid "hostapd snapshots: %ss, worker limit %s"
 msgstr "hostapd 快照耗时 %s 秒，最大并发 %s"
@@ -2371,8 +2371,11 @@ msgstr "辅助设备信息耗时 %s 秒，开始 IP 范围扫描"
 msgid "IP range scan: %ss; worker limit %s"
 msgstr "IP 范围扫描耗时 %s 秒，最大并发 %s"
 
-msgid "Device checks: %ss, %s unique IPs; total scan %ss"
-msgstr "设备检测耗时 %s 秒，共 %s 个 IP，本轮设备扫描总耗时 %s 秒"
+msgid "Device checks: %ss, %s candidates, %s online or pending; total scan %ss"
+msgstr "设备检测耗时 %s 秒，候选 IP %s 个，在线或待确认 %s 台，本轮设备扫描总耗时 %s 秒"
 
 msgid "Reachability %s: rc=%s (0=online), timeout %ss, retries %s"
 msgstr "ARP/ping %s：结果 %s（0 表示在线），配置超时 %s 秒，检测次数 %s"
+
+msgid "Polling OpenWrt hostapd clients on each device scan"
+msgstr "每轮设备扫描均读取 OpenWrt 的 hostapd 客户端列表"

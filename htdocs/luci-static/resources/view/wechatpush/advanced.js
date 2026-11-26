@@ -161,29 +161,32 @@ return view.extend({
 		};
 
 		o = s.option(form.Value, 'up_timeout', _('Device online detection timeout (s)'));
-		o.placeholder = "2"
+		o.default = '2';
 		o.optional = false
 		o.datatype = "uinteger"
 		o.rmempty = false;
 		o.depends('detect_mode', 'original');
 		o.depends('detect_mode', 'probe');
+		o.depends('detect_mode', 'hostapd');
 
 		o = s.option(form.Value, "down_timeout", _('Device offline detection timeout (s)'))
-		o.placeholder = "10"
+		o.default = '10';
 		o.optional = false
 		o.datatype = "uinteger"
 		o.rmempty = false;
 		o.depends('detect_mode', 'original');
 		o.depends('detect_mode', 'probe');
+		o.depends('detect_mode', 'hostapd');
 
 		o = s.option(form.Value, "timeout_retry_count", _('Offline detection count'))
-		o.placeholder = "2"
+		o.default = '2';
 		o.optional = false
 		o.datatype = "uinteger"
 		o.rmempty = false;
 		o.description = _("If the device has good signal strength and no Wi-Fi sleep issues, you can reduce the above values.<br/>Due to the mysterious nature of Wi-Fi sleep during the night, if you encounter frequent disconnections, please adjust the parameters accordingly.<br/>..╮(╯_╰）╭..")
 		o.depends('detect_mode', 'original');
 		o.depends('detect_mode', 'probe');
+		o.depends('detect_mode', 'hostapd');
 
 		o = s.option(form.Value, 'probe_inactive_secs', _('Probe: silent time before probing (s)'));
 		o.rmempty = true;
@@ -219,6 +222,7 @@ return view.extend({
 		o.description = _("When this option is selected, the offline timeout and offline detection count apply only to the devices that require push notifications. Other devices will use default values, which can significantly reduce the time required for detection. However, it may result in inaccurate online time displayed in the online devices list. It is recommended to enable this option only when there are many devices and frequent offline occurrences are observed for specific devices of interest.")
 		o.depends('detect_mode', 'original');
 		o.depends('detect_mode', 'probe');
+		o.depends('detect_mode', 'hostapd');
 
 		o = s.option(form.DynamicList, 'always_check_ip_list', _('IP address to always scan'));
 		o.datatype = 'ipaddr';

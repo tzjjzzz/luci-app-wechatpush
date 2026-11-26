@@ -59,6 +59,9 @@ read_config() {
 		"font_title" "font_success" "font_fail" "font_client" "font_module" \
 		"fail2ban_enable"
 
+	# Older configurations may have lost these values when switching detection modes.
+	: "${up_timeout:=2}" "${down_timeout:=10}" "${timeout_retry_count:=2}"
+
 	(echo "$device_notification" | grep -q "online") && notification_online="true"
 	(echo "$device_notification" | grep -q "offline") && notification_offline="true"
 	(echo "$cpu_notification" | grep -q "load") && notification_load="true"
@@ -194,7 +197,13 @@ scan_startup_log() {
 	local helpers=""
 	[ "$gateway_info_enable" = "true" ] && helpers="${helpers:+$helpers }$(translate "Optical modem")"
 	[ "$miwifi_info_enable" = "true" ] && helpers="${helpers:+$helpers }MiWiFi"
-	[ "$openwrt_info_enable" = "true" ] && helpers="${helpers:+$helpers }OpenWrt"
+	if [ "$openwrt_info_enable" = true ]; then
+		if [ "$offline_detect_method" = hostapd ] && [ "$passive_mode" != 1 ]; then
+			log_change "[INFO] $(translate "Polling OpenWrt hostapd clients on each device scan")"
+		else
+			helpers="${helpers:+$helpers }OpenWrt"
+		fi
+	fi
 	[ "$mikrotik_info_enable" = "true" ] && helpers="${helpers:+$helpers }MikroTik"
 	[ -n "$helpers" ] && log_change "[INFO] $(translate "Fetching device info(%s), every %s s" "$helpers" "${device_info_helper_sleeptime:-600}")"
 	[ "${log_scan:-0}" = "1" ] && log_change "[INFO] $(translate "Logging every scan is enabled (debug)")"
@@ -1249,6 +1258,8 @@ getping() {
 			return 1
 		fi
 		[ "$log_scan" = 1 ] && scan_log "$(translate "hostapd %s %s: ARP/ping fallback (previous AP: %s, incomplete snapshots: %s)" "$ip" "$mac" "${ap_previous:--}" "$ap_incomplete")"
+		# With an iputils deadline and -c 5, even a responding host can exit 1.
+		ping_count=1
 	else
 		interface=$(getinterface "$ip" "$mac")
 		[ "$iw_version" ] && [ "$interface" ] && wlan_online=$(iw dev "$interface" station dump 2>/dev/null | grep -i -w "$mac" | grep Station)
@@ -2610,13 +2621,13 @@ is_hidden_device() {
 dump_hostapd() {
 	local objects obj iface count=0
 	# Some ubus versions return "not found" for an empty wildcard.
-	objects=$(ubus list 'hostapd.*' 2>/dev/null) || objects=$(ubus list) || return 1
+	objects=$(ubus list 'hostapd.*' 2>/dev/null) || objects=$(ubus list) || { echo "@@ERROR ubus-list"; return 1; }
 	for obj in $objects; do
 		case "$obj" in hostapd.*) ;; *) continue ;; esac
 		iface=${obj#hostapd.}
-		case "$iface" in ''|*[!A-Za-z0-9_.:-]*) return 1 ;; esac
+		case "$iface" in ''|*[!A-Za-z0-9_.:-]*) echo '@@ERROR interface-name'; return 1 ;; esac
 		printf '["%s",' "$iface"
-		ubus call "$obj" get_clients || return 1
+		ubus call "$obj" get_clients || { printf '\n@@ERROR get_clients %s\n' "$iface"; return 1; }
 		printf ']\n'
 		count=$((count + 1))
 	done
@@ -2625,7 +2636,7 @@ dump_hostapd() {
 
 # One bounded worker per router. Only a complete reply can prove a client left.
 collect_hostapd() {
-	local work host port i source count iface mac freq leases arp ip name band
+	local work host port i source count iface mac freq ip name band reason detail accepted
 	local started=$SECONDS
 	work=$(mktemp -d "${dir}/ap.XXXXXX") || { ap_incomplete=1; return; }
 	[ ! -f "${dir}/send_pid" ] || ap_incomplete=1
@@ -2644,7 +2655,7 @@ cat /tmp/dhcp.leases 2>/dev/null
 echo @@ARP
 cat /proc/net/arp 2>/dev/null
 echo @@AP
-dump_hostapd || echo @@FAILED"
+dump_hostapd"
 	for i in "${!sources[@]}"; do
 		read -r -u 5
 		{
@@ -2664,7 +2675,11 @@ dump_hostapd || echo @@FAILED"
 	for i in "${!sources[@]}"; do
 		source=${sources[i]}
 		count=""
-		if [ -f "$work/$i.ok" ]; then
+		reason=""
+		if [ ! -f "$work/$i.ok" ]; then
+			if [ "$i" = 0 ]; then reason=local-ubus; else reason=ssh; fi
+		fi
+		if [ -s "$work/$i" ]; then
 			# Keep IP/name hints separate from association evidence.
 			awk -v leases="$work/leases" -v arp="$work/arp" -v ap="$work/json" '
 				/^@@/ {section=$1; if (section=="@@DONE") print $2; next}
@@ -2673,16 +2688,27 @@ dump_hostapd || echo @@FAILED"
 				section=="@@AP" {print > ap}
 			' "$work/$i" >"$work/count"
 			read -r count <"$work/count"
+			detail=$(awk '$1=="@@ERROR" {print $2, $3; exit}' "$work/$i")
+			[ -z "$detail" ] || reason=$detail
 		fi
-		if [[ $count =~ ^[0-9]+$ ]] && jq -sr --argjson n "$count" '
+		if [ -z "$reason" ] && ! [[ $count =~ ^[0-9]+$ ]]; then reason=missing-completion-marker; fi
+		if [ -z "$reason" ]; then
+			jq -sr --argjson n "$count" '
 			if length != $n or any(.[]; (.[1].clients | type) != "object") then error("incomplete hostapd reply") else
 			.[] | .[0] as $iface | .[1] | (.freq | if type=="number" then floor else 0 end) as $freq | .clients | to_entries[] |
-			select(.value.authorized == true and (.key | test("^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$"))) |
-			[$iface, (.key|ascii_downcase), $freq] | @tsv end' "$work/json" >"$work/rows" 2>/dev/null; then
+			select(.value.authorized == true) |
+			[$iface, (.key|ascii_downcase), $freq] | @tsv end' "$work/json" >"$work/rows" 2>"$work/jq-error" || {
+				IFS= read -r detail <"$work/jq-error"
+				reason="JSON: ${detail:0:120}"
+			}
+		fi
+		if [ -z "$reason" ]; then
 			ap_health[$source]=ok
 			[ "$count" = 0 ] && ap_health[$source]=empty
-			while read -r iface mac freq; do
-				[ -n "$mac" ] || continue
+			accepted=0
+			while IFS=$'\t' read -r iface mac freq; do
+				[[ $mac =~ ^([[:xdigit:]]{2}:){5}[[:xdigit:]]{2}$ ]] || continue
+				accepted=$((accepted + 1))
 				# Local wins when two APs briefly list the same roaming client.
 				[[ -n ${ap_source[$mac]} ]] && continue
 				ap_source[$mac]=$source
@@ -2693,10 +2719,10 @@ dump_hostapd || echo @@FAILED"
 				else band=unknown; fi
 				ap_band[$mac]=$band
 			done <"$work/rows"
-			[ "$log_scan" = 1 ] && scan_log "$(translate "hostapd %s: %s interfaces, %s authorized clients" "$source" "$count" "$(wc -l <"$work/rows")")"
+			[ "$log_scan" = 1 ] && scan_log "$(translate "hostapd %s: %s interfaces, %s authorized clients" "$source" "$count" "$accepted")"
 		else
 			ap_incomplete=1
-			[ "$log_scan" = 1 ] && scan_log "$(translate "hostapd %s: incomplete SSH/ubus reply, using reachability checks for missing clients" "$source")"
+			[ "$log_scan" = 1 ] && scan_log "$(translate "hostapd %s: snapshot failed (%s), using ARP/ping" "$source" "$reason")"
 		fi
 		: >"$work/json"
 	done
@@ -2853,7 +2879,7 @@ first() {
 	if [ -n "$ap_scan_active" ]; then
 		for ip in $IPLIST "${!known_status[@]}"; do queue_hostapd_device "$ip"; done
 		wait
-		[ "$log_scan" = 1 ] && scan_log "$(translate "Device checks: %ss, %s unique IPs; total scan %ss" "$((SECONDS-phase))" "${#scheduled[@]}" "$((SECONDS-scan_start))")"
+		[ "$log_scan" = 1 ] && scan_log "$(translate "Device checks: %ss, %s candidates, %s online or pending; total scan %ss" "$((SECONDS-phase))" "${#scheduled[@]}" "$(jq '[.devices[] | select(.status=="online" or .status=="unknown")] | length' "$devices_json")" "$((SECONDS-scan_start))")"
 		return 0
 	fi
 	for ip in $IPLIST; do
