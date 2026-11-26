@@ -96,11 +96,14 @@ return view.extend({
 		o.value('passive', _('Disable active detection'));
 		o.value('original', _('Original method'));
 		o.value('probe', _('Active probe'));
-		o.description = _('Disable active detection: device online/offline events are no longer pushed. Suitable for users who are not sensitive to online devices but need other features.<br/>Original method: a device that is still in the Wi-Fi association list is treated as online. A phone that silently walks out of range stays listed until hostapd removes it (default 5 minutes).<br/>Active probe: a Wi-Fi device that has been silent for a while is probed with ARP (a few packets, with a cooldown per device). If the probe fails, it is repeated once after a short delay, and two failures mark the device offline right away, without waiting for the next scan cycle. The values can be adjusted below. In this mode the offline detection count is treated as at least 1.');
+		o.value('hostapd', _('hostapd client list'));
+		o.value('hostapd_listen', _('hostapd event listener'));
+		o.description = _('Disable active detection: device online/offline events are no longer pushed. Suitable for users who are not sensitive to online devices but need other features.<br/>Original method: a device that is still in the Wi-Fi association list is treated as online. A phone that silently walks out of range stays listed until hostapd removes it (default 5 minutes).<br/>Active probe: a Wi-Fi device that has been silent for a while is probed with ARP (a few packets, with a cooldown per device). If the probe fails, it is repeated once after a short delay, and two failures mark the device offline right away, without waiting for the next scan cycle. The values can be adjusted below. In this mode the offline detection count is treated as at least 1.<br/>hostapd client list: poll local and selected OpenWrt APs every device scan. A tracked Wi-Fi client missing from complete AP lists is marked offline in that scan. Wired devices and incomplete replies use ARP/ping. Enable scan logging to see the AP, decision and timings.') + '<br/>' + _('Listen locally and over SSH on selected OpenWrt APs. A station event updates that client directly. Disconnect notifications allow about two seconds for roaming. Periodic snapshots recover missed events. Wired clients with increased upload counters skip ARP/ping.');
 		o.cfgvalue = function (section_id) {
 			if (uci.get('wechatpush', section_id, 'passive_mode') == '1')
 				return 'passive';
-			return uci.get('wechatpush', section_id, 'offline_detect_method') == 'probe' ? 'probe' : 'original';
+			var mode = uci.get('wechatpush', section_id, 'offline_detect_method');
+			return ['probe', 'hostapd', 'hostapd_listen'].includes(mode) ? mode : 'original';
 		};
 		o.write = function (section_id, value) {
 			uci.set('wechatpush', section_id, 'passive_mode', value == 'passive' ? '1' : '0');
@@ -159,29 +162,35 @@ return view.extend({
 		};
 
 		o = s.option(form.Value, 'up_timeout', _('Device online detection timeout (s)'));
-		o.placeholder = "2"
+		o.default = '2';
 		o.optional = false
 		o.datatype = "uinteger"
 		o.rmempty = false;
 		o.depends('detect_mode', 'original');
 		o.depends('detect_mode', 'probe');
+		o.depends('detect_mode', 'hostapd');
+		o.depends('detect_mode', 'hostapd_listen');
 
 		o = s.option(form.Value, "down_timeout", _('Device offline detection timeout (s)'))
-		o.placeholder = "10"
+		o.default = '10';
 		o.optional = false
 		o.datatype = "uinteger"
 		o.rmempty = false;
 		o.depends('detect_mode', 'original');
 		o.depends('detect_mode', 'probe');
+		o.depends('detect_mode', 'hostapd');
+		o.depends('detect_mode', 'hostapd_listen');
 
 		o = s.option(form.Value, "timeout_retry_count", _('Offline detection count'))
-		o.placeholder = "2"
+		o.default = '2';
 		o.optional = false
 		o.datatype = "uinteger"
 		o.rmempty = false;
 		o.description = _("If the device has good signal strength and no Wi-Fi sleep issues, you can reduce the above values.<br/>Due to the mysterious nature of Wi-Fi sleep during the night, if you encounter frequent disconnections, please adjust the parameters accordingly.<br/>..╮(╯_╰）╭..")
 		o.depends('detect_mode', 'original');
 		o.depends('detect_mode', 'probe');
+		o.depends('detect_mode', 'hostapd');
+		o.depends('detect_mode', 'hostapd_listen');
 
 		o = s.option(form.Value, 'probe_inactive_secs', _('Probe: silent time before probing (s)'));
 		o.rmempty = true;
@@ -217,6 +226,8 @@ return view.extend({
 		o.description = _("When this option is selected, the offline timeout and offline detection count apply only to the devices that require push notifications. Other devices will use default values, which can significantly reduce the time required for detection. However, it may result in inaccurate online time displayed in the online devices list. It is recommended to enable this option only when there are many devices and frequent offline occurrences are observed for specific devices of interest.")
 		o.depends('detect_mode', 'original');
 		o.depends('detect_mode', 'probe');
+		o.depends('detect_mode', 'hostapd');
+		o.depends('detect_mode', 'hostapd_listen');
 
 		o = s.option(form.DynamicList, 'always_check_ip_list', _('IP address to always scan'));
 		o.datatype = 'ipaddr';
@@ -226,6 +237,8 @@ return view.extend({
 		}, this);
 		o.depends('detect_mode', 'original');
 		o.depends('detect_mode', 'probe');
+		o.depends('detect_mode', 'hostapd');
+		o.depends('detect_mode', 'hostapd_listen');
 
 		o = s.option(form.MultiValue, 'lan_interface', _('LAN interfaces to scan'));
 		lanNets.forEach(function (net) {
@@ -237,6 +250,8 @@ return view.extend({
 		o.description = _('Select which network interfaces to scan for devices, e.g. the guest network. Leave empty to auto-detect all non-WAN interfaces.');
 		o.depends('detect_mode', 'original');
 		o.depends('detect_mode', 'probe');
+		o.depends('detect_mode', 'hostapd');
+		o.depends('detect_mode', 'hostapd_listen');
 
 		o = s.option(form.MultiValue, 'device_info_helper', _('Assist in obtaining device information'));
 		o.value('gateway_info', _('Retrieve hostname list from modem'));
@@ -249,6 +264,8 @@ return view.extend({
 		o.description = _('When OpenWrt is used as a bypass gateway and cannot obtain device hostnames or a complete list of local network devices.<br/>the \"Retrieve hostname list from modem\" option has only been tested with HG5143F/HN8145V China Telecom gateways and may not be universally applicable.<br/>The \"Scan local IP\" option may not retrieve hostnames, so please use device name annotations in conjunction with it.');
 		o.depends('detect_mode', 'original');
 		o.depends('detect_mode', 'probe');
+		o.depends('detect_mode', 'hostapd');
+		o.depends('detect_mode', 'hostapd_listen');
 
 		o = s.option(form.Value, "gateway_host_url", _('Optical modem login URL'));
 		o.rmempty = true;

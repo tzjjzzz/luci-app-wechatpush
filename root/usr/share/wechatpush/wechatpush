@@ -59,6 +59,9 @@ read_config() {
 		"font_title" "font_success" "font_fail" "font_client" "font_module" \
 		"fail2ban_enable"
 
+	# Older configurations may have lost these values when switching detection modes.
+	: "${up_timeout:=2}" "${down_timeout:=10}" "${timeout_retry_count:=2}"
+
 	(echo "$device_notification" | grep -q "online") && notification_online="true"
 	(echo "$device_notification" | grep -q "offline") && notification_offline="true"
 	(echo "$cpu_notification" | grep -q "load") && notification_load="true"
@@ -194,7 +197,15 @@ scan_startup_log() {
 	local helpers=""
 	[ "$gateway_info_enable" = "true" ] && helpers="${helpers:+$helpers }$(translate "Optical modem")"
 	[ "$miwifi_info_enable" = "true" ] && helpers="${helpers:+$helpers }MiWiFi"
-	[ "$openwrt_info_enable" = "true" ] && helpers="${helpers:+$helpers }OpenWrt"
+	if [ "$openwrt_info_enable" = true ]; then
+		if [ "$offline_detect_method" = hostapd ] && [ "$passive_mode" != 1 ]; then
+			log_change "[INFO] $(translate "Polling OpenWrt hostapd clients on each device scan")"
+		elif [[ $offline_detect_method = hostapd_listen && $passive_mode != 1 ]]; then
+			log_change "[INFO] $(translate "Listening for OpenWrt hostapd station events")"
+		else
+			helpers="${helpers:+$helpers }OpenWrt"
+		fi
+	fi
 	[ "$mikrotik_info_enable" = "true" ] && helpers="${helpers:+$helpers }MikroTik"
 	[ -n "$helpers" ] && log_change "[INFO] $(translate "Fetching device info(%s), every %s s" "$helpers" "${device_info_helper_sleeptime:-600}")"
 	[ "${log_scan:-0}" = "1" ] && log_change "[INFO] $(translate "Logging every scan is enabled (debug)")"
@@ -332,6 +343,7 @@ cron() {
 # ------------------------------------
 # 主程序
 main() {
+	local -A tx_previous=()
 	# 限制并发进程
 	dir="/tmp/wechatpush" && mkdir -p ${dir}
 	get_config "thread_num"
@@ -408,6 +420,21 @@ main() {
 	log_change "[INFO] $(translate "Loading online devices...")"
 	silent_run monitor_logins
 	silent_run monitor_fail2ban
+	# Keep the last complete AP view in the daemon between station events.
+	local -A ap_source=() ap_iface=() ap_band=() ap_health=() ap_mac=() ap_watchers=()
+	local -A ap_ready=() ap_lease_retry=() ap_log_batch=() ap_departure=() ap_dirty=() ap_retry_at=() ap_ip_hint=() ap_radio_band=()
+	local ap_listener="" ap_refresh_at=0 ap_range_at=0 ap_incomplete=0 openwrt_iplist=""
+	if [[ $offline_detect_method = hostapd_listen && $passive_mode != 1 ]]; then
+		local event_fifo="$dir/ap-events.$$"
+		if mkfifo -m 600 "$event_fifo" && exec 8<>"$event_fifo"; then
+			ap_listener=$BASHPID
+			mkdir -p "$dir/ap-notify"
+			rm -f "$dir/ap-notify/"{title,content,title_stat}
+		else
+			log_change "[WARN] $(translate "Could not open hostapd event pipe, polling on each scan")"
+		fi
+		rm -f "$event_fifo"
+	fi
 	>"${dir}/send_enable.lock" && first && deltemp
 	log_change "[INFO] $(translate "Initialization completed")"
 
@@ -428,20 +455,7 @@ main() {
 			ip_changes
 		fi
 
-		# 设备列表
-		if [ ! -f "${dir}/send_enable.lock" ]; then
-			[ -n "$title" ] && echo "$title" >"${dir}/title"
-			[ -n "$content" ] && echo "$content" >"${dir}/content"
-			first
-			[ -f "${dir}/title" ] && title=$(cat "${dir}/title") && rm -f "${dir}/title" >/dev/null 2>&1
-			[ -f "${dir}/content" ] && content=$(cat "${dir}/content") && rm -f "${dir}/content" >/dev/null 2>&1
-		fi
-
-		# 离线二次验证区推送
-		[ ! -f "${dir}/send_enable.lock" ] && down_send
-
-		# 当前设备列表
-		[ -n "$content" ] && [ ! -f "${dir}/send_enable.lock" ] && current_device
+		scan_device_events
 
 		# 无人值守任务
 		[ ! -f "${dir}/send_enable.lock" ] && scan_due unattended "$unattended_scan_interval" && unattended
@@ -537,15 +551,12 @@ main() {
 			[ -n "$tmp_ip" ] && add_ip_white "$tmp_ip" "0"
 		done <<<"$tmp_ip_list"
 
-		# 推送
-		if [ ! -f "${dir}/send_enable.lock" ] && [ -n "$title" ] && [ -n "$content" ]; then
-			(echo "$lite_enable" | grep -q "content") && content="$title"
-			disturb
-			disturb_RETVAL=$?
-			[ "$disturb_RETVAL" -eq 0 ] && diy_send "${title}" "${content}" "${jsonpath}" >/dev/null 2>&1
+		push_scan_message
+		if [ -n "$ap_listener" ]; then
+			wait_ap_events
+		else
+			sleep "$sleeptime"
 		fi
-
-		sleep $sleeptime
 
 		# 等待定时任务推送完成
 		while [ -f "${dir}/send_pid" ]; do
@@ -558,6 +569,37 @@ main() {
 			fi
 		done
 	done
+	exit 0
+}
+
+scan_device_events() {
+	# 设备列表
+	if [ ! -f "${dir}/send_enable.lock" ]; then
+		[ -n "$title" ] && echo "$title" >"${dir}/title"
+		[ -n "$content" ] && echo "$content" >"${dir}/content"
+		first "$1"
+		[ -f "${dir}/title" ] && title=$(cat "${dir}/title") && rm -f "${dir}/title" >/dev/null 2>&1
+		[ -f "${dir}/content" ] && content=$(cat "${dir}/content") && rm -f "${dir}/content" >/dev/null 2>&1
+	fi
+
+	# 离线二次验证区推送
+	[ ! -f "${dir}/send_enable.lock" ] && down_send
+
+	# 当前设备列表
+	[ -n "$content" ] && [ ! -f "${dir}/send_enable.lock" ] && current_device
+}
+
+push_scan_message() {
+	# 推送
+	if [ ! -f "${dir}/send_enable.lock" ] && [ -n "$title" ] && [ -n "$content" ]; then
+		(echo "$lite_enable" | grep -q "content") && content="$title"
+		disturb
+		disturb_RETVAL=$?
+		if [[ -n $ap_event_dispatch && $log_scan = 1 ]]; then
+			scan_log "$(translate "hostapd notification: %s (quiet-mode result %s; 0 sends)" "$title" "$disturb_RETVAL")"
+		fi
+		[ "$disturb_RETVAL" -eq 0 ] && diy_send "${title}" "${content}" "${jsonpath}" >/dev/null 2>&1
+	fi
 }
 
 # ------------------------------------
@@ -666,7 +708,7 @@ iface_body_line() {
 #   usage 流量异常（文字=组好的标题）   other 其他提醒（重启、IP 变化、CPU，文字=第一条的标题）
 # 参数: $1 类型  $2 文字  $3 增加的数量(默认 1)  $4 replace=只替换 other 的文字
 title_event() {
-	local f="${dir}/title_stat"
+	local f="${notice_dir:-$dir}/title_stat"
 	[ -f "$f" ] || : >"$f"
 	T="$2" awk -v k="$1" -v a="${3:-1}" -v m="$4" '
 		$1==k { found=1; n=$2+a; rest=$0; sub(/^[^ ]+ [^ ]+ ?/, "", rest); t=ENVIRON["T"]
@@ -679,7 +721,7 @@ title_event() {
 
 # 根据 title_stat 生成标题：只有一类事件就用该类事件自己的标题，多类事件合并成"设备状态变化（2 连接、1 断开）"
 title_compose() {
-	local f="${dir}/title_stat"
+	local f="${notice_dir:-$dir}/title_stat"
 	[ -s "$f" ] || return
 	if [ "$(grep -c "" "$f")" -eq 1 ]; then
 		local kind=$(awk '{print $1; exit}' "$f")
@@ -842,12 +884,7 @@ LockFile() {
 
 	if [ "$1" = "lock" ]; then
 		eval "exec $fd>$lock_file"
-		flock -n $fd
-		if [ $? -ne 0 ]; then
-			while ! flock -n $fd; do
-				sleep 1
-			done
-		fi
+		flock "$fd"
 	elif [ "$1" = "unlock" ]; then
 		eval "exec $fd>&-"
 	fi
@@ -855,6 +892,14 @@ LockFile() {
 
 # 检测退出信号
 cleanup() {
+	if [[ -n $ap_listener && $BASHPID = "$ap_listener" ]]; then
+		local pid
+		for pid in "${ap_watchers[@]}"; do
+			[[ /proc/$pid/fd/1 -ef /proc/self/fd/8 ]] && kill "$pid" 2>/dev/null
+		done
+		exec 8>&-
+		ap_listener=""
+	fi
 	local pids=$(ps | grep -E "\{wechatpush\}_${MAIN_PID}|\{wechatpush-call\}" | grep -v grep | awk '{print $1}')
 	[ -n "$pids" ] && echo "$pids" | xargs kill 2>/dev/null
 	LockFile unlock
@@ -948,12 +993,17 @@ getinterface() {
 	[ -z "$mac" ] && return
 	[ "$mac" == "unknown" ] && return
 
+	if [ -n "$ap_scan_active" ] && [[ ${ap_source[${mac,,}]} = Local ]]; then
+		echo "${ap_iface[${mac,,}]}"
+		return
+	fi
+
 	# 从已保存的地址中获取接口
 	interface=$(jq -r --arg ip "$ip" --arg mac "$mac" '.devices[] | select(.ip == $ip and (.mac | ascii_downcase) == ($mac | ascii_downcase)) | .interface' "$devices_json")
 	process_and_check "$interface" && return
 
 	# 如果定义了 WLAN 接口列表，则查询每个接口
-	if [ -n "$wlan_interface" ]; then
+	if [ -z "$ap_scan_active" ] && [ -n "$wlan_interface" ]; then
 		for interface_wlan in $wlan_interface; do
 			interface=$(iw dev "$interface_wlan" station dump 2>/dev/null | grep -i -w "$mac" | sed -nr 's#^.*on (.*))#\1#gp')
 			process_and_check "$interface" && return
@@ -1205,10 +1255,10 @@ check_http_access() {
 	local ip="$1"
 	[ -z "$ip" ] && return 1
 
-	curl --head --silent --fail --connect-timeout 3 "http://$ip" >/dev/null
+	curl --head --silent --fail --max-time 3 "http://$ip" >/dev/null
 	[ $? -eq 0 ] && echo "http" && return
 
-	curl --head --silent --fail --connect-timeout 3 "https://$ip" >/dev/null
+	curl --head --silent --fail --max-time 3 "https://$ip" >/dev/null
 	[ $? -eq 0 ] && echo "https" && return
 
 	return 1
@@ -1231,13 +1281,33 @@ getping() {
 	# 第 5 个参数为 1：使用"主动探测"离线检测方式（设置里 offline_detect_method=probe）。
 	# 不传或为空则完全保持原有行为。
 	local probe="$5"
-	local probe_cd_file=""
+	local probe_cd_file="" wlan_online=""
 	local arping_count=20 ping_count=5
-
-	local interface=$(getinterface "$ip" "$mac")
-	# 主动探测模式下先清空上一次的结果，避免同一个进程里连续调用两次时读到旧值
-	[ "$probe" = "1" ] && wlan_online=""
-	[ "$iw_version" ] && [ "$interface" ] && wlan_online=$(iw dev ${interface} station dump 2>/dev/null | grep -i -w "$mac" | grep Station) >/dev/null 2>&1
+	local interface
+	if [ -n "$ap_scan_active" ]; then
+		local key=${mac,,}
+		ap_decision=fallback
+		if [ -n "$key" ] && [[ -n ${ap_source[$key]} ]]; then
+			ap_decision=online
+			ap_owner=${ap_source[$key]}
+			[ "$log_scan" = 1 ] && scan_log "$(translate "hostapd %s %s: authorized on %s (%s)" "$ip" "$mac" "$ap_owner" "${ap_iface[$key]}")"
+			return 0
+		fi
+		if [[ -n ${ap_hold[$ip]} ]]; then
+			[ "$log_scan" = 1 ] && scan_log "$(translate "hostapd %s %s: waiting for roaming confirmation" "$ip" "$mac")"
+			return 0
+		fi
+		if [[ -n $ap_previous && ${ap_health[$ap_previous]} = ok && $ap_incomplete = 0 ]]; then
+			ap_decision=offline
+			[ "$log_scan" = 1 ] && scan_log "$(translate "hostapd %s %s: left %s, absent from all APs, offline" "$ip" "$mac" "$ap_previous")"
+			return 1
+		fi
+		# With an iputils deadline and -c 5, even a responding host can exit 1.
+		ping_count=1
+	else
+		interface=$(getinterface "$ip" "$mac")
+		[ "$iw_version" ] && [ "$interface" ] && wlan_online=$(iw dev "$interface" station dump 2>/dev/null | grep -i -w "$mac" | grep Station)
+	fi
 	[ "$wlan_online" ] && {
 		local wlan_trusted=1
 		if [ "$probe" = "1" ]; then
@@ -1277,24 +1347,29 @@ getping() {
 	[ "$probe" = "1" ] && [ -z "$wlan_online" ] && probe_cd_file=""
 	[ "$probe" = "1" ] && [ "$retry_count" -lt 1 ] 2>/dev/null && retry_count=1
 
-	interface=$(cat /proc/net/arp | grep -w "$ip" | awk '{print $6}' | grep -v "^$" | sort -u | head -n1)
-	for i in $(seq 1 "$retry_count"); do
-		# arping 应使用 br-lan 等接口，有 WiFi 的设备接口为 wlan*，重新获取
-		[ -n "$interface" ] && local arp_entry_count=$(cat /proc/net/arp | grep '0x[26]' | grep -i -w "$mac" | wc -l 2>/dev/null)
-
-		# 避免无效的 arp 条目
-		if [ -n "$arp_entry_count" ] && [ "$arp_entry_count" -le 1 ]; then
-			ip_ms=$(run_with_tag arping -I "$interface" -c "$arping_count" -f -w "$timeout" "$ip" 2>/dev/null)
-			echo "$ip_ms" | grep -q "ms" && break || ip_ms=$(run_with_tag ping -c "$ping_count" -w 3 "$ip" 2>/dev/null | grep -v '100% packet loss')
-		else
-			ip_ms=$(run_with_tag ping -c "$ping_count" -w 3 "$ip" 2>/dev/null | grep -v '100% packet loss')
-			echo "$ip_ms" | grep -q "ms" && break || ip neigh del "$ip" dev "$interface" 2>/dev/null # 清理无效条目
+	if [[ -z $wlan_online && -z $ap_previous && -n $mac && ${tx_active[$ip]} = "${mac,,}" ]]; then
+		[ "$log_scan" = 1 ] && scan_log "$(translate "%s %s: upload counter increased, skipping ARP/ping" "$ip" "$mac")"
+		return 0
+	fi
+	if [[ $ap_decision = fallback && $log_scan = 1 ]]; then
+		scan_log "$(translate "hostapd %s %s: ARP/ping fallback (previous AP: %s, incomplete snapshots: %s)" "$ip" "$mac" "${ap_previous:--}" "$ap_incomplete")"
+	fi
+	local arp_count i ping_rc=1
+	read -r interface arp_count < <(awk -v ip="$ip" -v mac="$mac" '
+		$1==ip && !iface {iface=$6}
+		($3=="0x2" || $3=="0x6") && tolower($4)==tolower(mac) {n++}
+		END {print (iface ? iface : "-"), n+0}' /proc/net/arp 2>/dev/null)
+	for ((i=0; i<retry_count; i++)); do
+		if [[ -n $interface && $interface != - && $arp_count -le 1 ]]; then
+			if run_with_tag arping -I "$interface" -c "$arping_count" -f -w "$timeout" "$ip" >/dev/null 2>&1; then ping_rc=0; break; fi
 		fi
-		sleep 1
+		if run_with_tag ping -c "$ping_count" -w 3 "$ip" >/dev/null 2>&1; then ping_rc=0; break; fi
+		if [[ -n $interface && $interface != - && $arp_count -gt 1 ]]; then ip neigh del "$ip" dev "$interface" 2>/dev/null; fi
+		((i+1 < retry_count)) && sleep 1
 	done
-	unset i
-	echo "$ip_ms" | grep -q "ms"
-	local ping_rc=$?
+	if [ "$ap_decision" = fallback ] && [ "$log_scan" = 1 ]; then
+		scan_log "$(translate "Reachability %s: rc=%s (0=online), timeout %ss, retries %s" "$ip" "$ping_rc" "$timeout" "$retry_count")"
+	fi
 	[ "$ping_rc" -eq 0 ] && [ -n "$probe_cd_file" ] && touch "$probe_cd_file" 2>/dev/null
 	return $ping_rc
 }
@@ -1972,14 +2047,8 @@ scanlocalip() {
 		local start_int=$(ip2int "$start_ip")
 		local end_int=$(ip2int "$end_ip")
 
-		tmp_thread_num=5
-		# 临时增加并发数
-		for i in $(seq 1 "$tmp_thread_num"); do
-			echo >&5
-		done
-		unset i
-
-		for i in $(seq "$start_int" "$end_int"); do
+		local i current_ip
+		for ((i = start_int; i <= end_int; i++)); do
 			# 获取一个令牌
 			read -u 5
 			{
@@ -1991,12 +2060,6 @@ scanlocalip() {
 		done
 		unset i
 		wait
-
-		# 减少临时并发数
-		for i in $(seq 1 "$tmp_thread_num"); do
-			read -u 5
-		done
-		unset i
 
 		last_scan_ip_time="$current_time"
 	fi
@@ -2195,7 +2258,9 @@ op_ssh() {
 getopenwrt() {
 	[ -z "$openwrt_info_enable" ] && return
 	local last_openwrt_time=$(file_date "${dir}/openwrt_info")
-	if [ "$last_openwrt_time" -ge "$device_info_helper_sleeptime" ]; then
+	local op_detect_mode_file="${dir}/openwrt_detect_mode"
+	local op_previous_detect_mode=$(cat "$op_detect_mode_file" 2>/dev/null)
+	if [ "$last_openwrt_time" -ge "$device_info_helper_sleeptime" ] || [ "$op_previous_detect_mode" != "$offline_detect_method" ]; then
 		scan_log "$(translate "Fetching device info(%s)" "OpenWrt")"
 		# 初始化一个空数组（bash 数组）
 		local json_array=()
@@ -2213,7 +2278,7 @@ for i in $(iw dev 2>/dev/null | grep Interface | awk '{print $2}'); do
 echo "@@IFACE $i"
 iw dev $i info 2>/dev/null
 echo "@@STA $i"
-iw dev $i station dump 2>/dev/null
+iw dev "$i" station dump 2>/dev/null
 done
 EOS
 )
@@ -2221,7 +2286,7 @@ EOS
 		local -a op_pid_list=()
 		local op_idx=0 op_waited=0 op_raw="${dir}/op_raw.$$" op_i
 		# 同时在抓的旁路由数量不超过设置里的"最大并发进程数"（thread_num，没填或填 0 时按 5）
-		local op_limit="${thread_num:-5}"
+		local op_limit="${max_thread_num:-5}"
 		case "$op_limit" in '' | *[!0-9]*) op_limit=5 ;; esac
 		[ "$op_limit" -lt 1 ] && op_limit=5
 		for op_host_entry in $op_host_ips; do
@@ -2243,7 +2308,7 @@ EOS
 		_op_section() { awk -v s="@@$2" '$0 == s {f = 1; next} /^@@/ {f = 0} f' "$1"; }
 		for ((op_i = 0; op_i < op_idx; op_i++)); do
 			local op_host_ip="${op_hosts[$op_i]}" op_host_sshport="${op_ports[$op_i]}" op_file="${op_raw}.${op_i}"
-			local wlan_interfaces=$(awk '/^@@IFACE /{print $2}' "$op_file")
+			local wlan_interfaces=$(awk '/^@@IFACE /{print $2} /^@@STA /{print $2}' "$op_file" | sort -u)
 			local leases_info=$(_op_section "$op_file" "LEASES")
 			local arp_info=$(_op_section "$op_file" "ARP")
 			local openwrt_arp_iplist+="$(echo "$arp_info" | awk '{print $1}')"$'\n'
@@ -2273,35 +2338,34 @@ EOS
 
 				# 逐行输出设备信息
 				while read -r line; do
-					if [[ "$line" =~ "Station" ]]; then
-						# 提取设备的MAC地址
-						local mac=$(echo "$line" | awk '{print $2}')
+					local mac=""
+					[[ "$line" =~ Station ]] && mac=$(echo "$line" | awk '{print $2}')
+					[ -n "$mac" ] || continue
 
-						# 查找设备名称
-						local ip=$(echo "$arp_info" | awk -v mac="$mac" '$4 == mac {print $1; exit}')
-						[ -z "$ip" ] && local ip=$(jq -r --arg mac "$mac" '.devices[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase)) | .ip' "$devices_json")
-						local name=$(echo "$leases_info" | awk -v mac="$mac" '$2 == mac {print $4; exit}')
-						[ -z "$ip" ] && ip="unknown"
-						[ -z "$name" ] && name="unknown"
+					# 查找设备名称
+					local ip=$(echo "$arp_info" | awk -v mac="$mac" '$4 == mac {print $1; exit}')
+					[ -z "$ip" ] && ip=$(jq -r --arg mac "$mac" '.devices[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase)) | .ip' "$devices_json")
+					local name=$(echo "$leases_info" | awk -v mac="$mac" '$2 == mac {print $4; exit}')
+					[ -z "$ip" ] && ip="unknown"
+					[ -z "$name" ] && name="unknown"
 
-						# 生成JSON格式的设备信息，并将其添加到数组中
-						local json_device=$(jq -n \
-							--arg ip "$ip" \
-							--arg name "$name" \
-							--arg mac "$mac" \
-							--arg parent "$op_host_ip" \
-							--arg type "$band" '
-							{
-								ip: $ip,
-								name: $name,
-								mac: $mac,
-								parent: $parent,
-								type: $type
-							}')
+					# 生成JSON格式的设备信息，并将其添加到数组中
+					local json_device=$(jq -n \
+						--arg ip "$ip" \
+						--arg name "$name" \
+						--arg mac "$mac" \
+						--arg parent "$op_host_ip" \
+						--arg type "$band" '
+						{
+							ip: $ip,
+							name: $name,
+							mac: $mac,
+							parent: $parent,
+							type: $type
+						}')
 
-						# 将生成的 JSON 设备信息添加到数组中
-						json_array+=("$json_device")
-					fi
+					# 将生成的 JSON 设备信息添加到数组中
+					json_array+=("$json_device")
 				done <<< "$devices"
 			done
 		done
@@ -2313,6 +2377,7 @@ EOS
 		[ -n "$(echo "$lease_rows" | grep -v '^$')" ] && echo "$lease_rows" | grep -v '^$' | sort -u >"${dir}/openwrt_leases"
 		openwrt_iplist=$(jq -r '.[] | select(.ip != "unknown" and .ip != "") | .ip' "${dir}/openwrt_info")
 		openwrt_iplist+=$'\n'"$openwrt_arp_iplist"
+		echo "$offline_detect_method" > "$op_detect_mode_file"
 	else
 		unset openwrt_iplist
 	fi
@@ -2603,6 +2668,357 @@ is_hidden_device() {
 	return 1
 }
 
+# This function is also sent to remote OpenWrt /bin/sh. Parse JSON on the main router.
+dump_hostapd() {
+	local objects obj iface count=0
+	# Some ubus versions return "not found" for an empty wildcard.
+	objects=$(ubus list 'hostapd.*' 2>/dev/null) || objects=$(ubus list) || { echo "@@ERROR ubus-list"; return 1; }
+	for obj in $objects; do
+		case "$obj" in hostapd.*) ;; *) continue ;; esac
+		iface=${obj#hostapd.}
+		case "$iface" in ''|*[!A-Za-z0-9_.:-]*) echo '@@ERROR interface-name'; return 1 ;; esac
+		printf '["%s",' "$iface"
+		ubus call "$obj" get_clients || { printf '\n@@ERROR get_clients %s\n' "$iface"; return 1; }
+		printf ']\n'
+		count=$((count + 1))
+	done
+	echo "@@DONE $count"
+}
+
+# Tag remote log lines before multiplexing them into the local event pipe.
+ensure_ap_listeners() {
+	local entry host port pid key identity pattern='AP-STA-.*CONNECTED'
+	local -a entries=(Local) args
+	[ -z "$openwrt_info_enable" ] || entries+=( $op_host_ips )
+	for entry in "${entries[@]}"; do
+		pid=${ap_watchers[$entry]}
+		[[ -n $pid && /proc/$pid/fd/1 -ef /proc/self/fd/8 ]] && continue
+		ap_refresh_at=0
+		(( SECONDS >= ${ap_retry_at[$entry]:-0} )) || continue
+		if [ "$entry" = Local ]; then
+			logread -f -e "$pattern" >&8 8>&- 5>&- 2>/dev/null &
+		else
+			read -r host port <<<"$(op_ssh_target "$entry")"
+			unset 'ap_ready[$host]'
+			key=$(echo "${host}_${port}" | tr -c 'A-Za-z0-9_.-' '_')
+			# Snapshot SSH already selected a working identity. If none is
+			# known yet, let this round's bounded snapshot retry discovery.
+			[[ -s $dir/op_ssh_ok_$key ]] && IFS= read -r identity <"$dir/op_ssh_ok_$key" || continue
+			[[ $host =~ ^[a-zA-Z0-9._:%-]+$ ]] || continue
+			args=(-p "$port" -o BatchMode=yes -o StrictHostKeyChecking=no)
+			[ "$identity" = - ] || args+=(-i "$identity")
+			case "$(readlink -f "$(command -v ssh)")" in
+				*dropbear*|*dbclient*) args+=(-K 20) ;;
+				*) args+=(-o ConnectTimeout=5 -o ServerAliveInterval=20 -o ServerAliveCountMax=2) ;;
+			esac
+			HOME=/root ssh "${args[@]}" "root@$host" "echo '@$host READY'; logread -f -e '$pattern' | while IFS= read -r line; do printf '@%s %s\\n' '$host' \"\$line\"; done" </dev/null >&8 8>&- 5>&- 2>/dev/null &
+		fi
+		ap_watchers[$entry]=$!
+		disown "${ap_watchers[$entry]}"
+		ap_retry_at[$entry]=$((SECONDS + 10))
+		[ "$log_scan" = 1 ] && scan_log "$(translate "Starting hostapd event listener on %s" "$entry")"
+	done
+}
+
+# Update ownership in arrival order. A late departure from the old BSS
+# must never cancel an association already observed on the new BSS.
+record_ap_event() {
+	local line=$1 source=Local iface action mac stamp
+	if [[ $line = @* ]]; then
+		source=${line%% *}; source=${source#@}; line=${line#* }
+		if [[ $line = READY ]]; then ap_ready[$source]=1; ap_refresh_at=0; return; fi
+	fi
+	local pattern='hostapd(\[[0-9]+\])?:[[:space:]]+([[:alnum:]_.:-]+):[[:space:]]+AP-STA-(CONNECTED|DISCONNECTED)[[:space:]]+(([[:xdigit:]]{2}:){5}[[:xdigit:]]{2})([[:space:]]|$)'
+	[[ $line =~ $pattern ]] || return 0
+	iface=${BASH_REMATCH[2]}; action=${BASH_REMATCH[3]}; mac=${BASH_REMATCH[4],,}
+	if [[ $action = CONNECTED ]]; then
+		[[ ${ap_source[$mac]} != "$source" || ${ap_iface[$mac]} != "$iface" || -n ${ap_departure[$mac]} ]] || return 0
+		unset 'ap_departure[$mac]'
+		ap_source[$mac]=$source
+		ap_iface[$mac]=$iface
+		ap_band[$mac]=${ap_radio_band["$source/$iface"]:-unknown}
+		ap_dirty[$mac]=1
+	else
+		[[ ${ap_source[$mac]} = "$source" && ${ap_iface[$mac]} = "$iface" && -z ${ap_departure[$mac]} ]] || return 0
+		ap_departure[$mac]=$((SECONDS + 2))
+	fi
+	if [[ $log_scan = 1 ]]; then
+		stamp=${line% *.* hostapd*}
+		[[ $stamp != "$line" ]] || stamp="-"
+		ap_log_batch[$mac]="$source $iface $action ${stamp:0:40}"
+	fi
+}
+
+# One DB read per batch. Separate notification files let a station event
+# send while regular scan workers are still collecting their own messages.
+apply_ap_events() {
+	local mac ip old source iface action stamp healthy="" changed="" title="" content=""
+	local notice_dir="$dir/ap-notify" ap_event_dispatch=1 ap_scan_active=1
+	local -A ips=() owners=() occupants=() joins=()
+	local -a updates=()
+	for mac in "${!ap_log_batch[@]}"; do
+		read -r source iface action stamp <<<"${ap_log_batch[$mac]}"
+		scan_log "$(translate "hostapd %s/%s: %s %s (AP log: %s)" "$source" "$iface" "$action" "$mac" "$stamp")"
+		unset 'ap_log_batch[$mac]'
+	done
+	for mac in "${!ap_departure[@]}"; do
+		(( SECONDS >= ap_departure[$mac] )) || continue
+		IFS= read -r -t 0 -u 8 && continue
+		unset 'ap_departure[$mac]' 'ap_source[$mac]' 'ap_iface[$mac]' 'ap_band[$mac]'
+		ap_dirty[$mac]=1
+	done
+	(( ${#ap_dirty[@]} )) || return 0
+	[[ ! -f $dir/send_pid && ! -f $dir/send_enable.lock ]] || return 0
+	while read -r mac ip old; do
+		[[ -n $mac && -n $ip ]] || continue
+		ips[$mac]=$ip; owners[$mac]=$old; occupants[$ip]=$mac
+	done < <(jq -r '.devices[] | [(.mac // "" | ascii_downcase), .ip, (.hostapd_source // "-")] | @tsv' "$devices_json")
+
+	for mac in "${!ap_dirty[@]}"; do
+		unset 'ap_dirty[$mac]'
+		source=${ap_source[$mac]}
+		ip=${ips[$mac]:-${ap_ip_hint[$mac]}}
+		if [[ -n $ip && -n ${occupants[$ip]} && ${occupants[$ip]} != "$mac" ]]; then ip=""; fi
+		if [[ -z $ip && -n $source ]]; then
+			local allowed="" link=""
+			if [[ $source = Local && -n $lan_interface ]]; then
+				allowed=$(resolve_iface_devices "$lan_interface" "$dir/lan_devices_cache")
+			fi
+			read -r ip link < <(awk -v m="$mac" 'tolower($4)==m && ($3=="0x2" || $3=="0x6"){print $1,$6;exit}' /proc/net/arp 2>/dev/null)
+			if [[ $source = Local && -n $lan_interface ]]; then
+				[[ -n $link && $'\n'"$allowed"$'\n' = *$'\n'"$link"$'\n'* ]] || continue
+			fi
+			[[ -n $ip ]] || ip=$(awk -v m="$mac" 'tolower($2)==m {print $3;exit}' /tmp/dhcp.leases 2>/dev/null)
+			# For a remote-only subnet, the last lease/neighbor dump can
+			# already contain a station which had not associated at startup.
+			if [[ -z $ip && $source != Local ]]; then
+				ip=$(awk -v m="$mac" '$2==m {print $1;exit}' "$dir/openwrt_arp" "$dir/openwrt_leases" 2>/dev/null)
+			fi
+			# Stations without an address remain in ap_source. Discovery
+			# will pick them up after DHCP or the next reconciliation.
+		fi
+		[[ $ip =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || continue
+		if [[ -n $hide_ips$hide_macs ]] && is_hidden_device "$ip" "$mac"; then continue; fi
+		ap_ip_hint[$mac]=$ip
+		[[ -z $ap_scan_work ]] || : >"$ap_scan_work/$ip"
+		if [[ -n $source ]]; then
+			ap_mac[$ip]=$mac
+			if [[ -n ${ips[$mac]} ]]; then
+				updates+=("$mac $ip $source ${ap_iface[$mac]} ${ap_band[$mac]:-unknown}")
+			else
+				joins[$mac]=$ip
+				changed=1
+			fi
+		else
+			unset 'ap_mac[$ip]' 'tx_previous[$ip,$mac]' 'tx_active[$ip]'
+			[[ -n ${ips[$mac]} && ${owners[$mac]} != - ]] || continue
+			if [[ -z $healthy ]]; then
+				if ap_streams_healthy; then healthy=yes; else healthy=no; fi
+			fi
+			if (( ap_incomplete )) || [[ $healthy != yes ]]; then ap_refresh_at=0; continue; fi
+			updates+=("$mac $ip - - -")
+			changed=1
+		fi
+	done
+	if (( ${#updates[@]} )); then
+		silent_run LockFile lock
+		printf '%s\n' "${updates[@]}" | jq -Rn --slurpfile db "$devices_json" '
+			INDEX(inputs | split(" "); .[0]) as $updates | $db[0] |
+			.devices |= map($updates[(.mac // "" | ascii_downcase)] as $u |
+				if $u==null or .ip!=$u[1] then .
+				elif $u[2]=="-" then .status="offline" | .hostapd_event=true
+				else .status="online" | .parent=$u[2] | .hostapd_source=$u[2] | .type=$u[4] |
+					if $u[2]=="Local" then .interface=$u[3] else . end end)' >"$tmp_devices_json" && mv "$tmp_devices_json" "$devices_json"
+		silent_run LockFile unlock
+	fi
+	for mac in "${!joins[@]}"; do up "${joins[$mac]}" "$mac"; done
+	[[ -n $changed ]] || return 0
+	[[ ! -f $notice_dir/title ]] || title=$(<"$notice_dir/title")
+	[[ ! -f $notice_dir/content ]] || content=$(<"$notice_dir/content")
+	down_send
+	if [[ -n $content ]]; then current_device; push_scan_message; fi
+	rm -f "$notice_dir/title" "$notice_dir/content" "$notice_dir/title_stat"
+}
+
+ap_streams_healthy() {
+	local entry pid host
+	local -a entries=(Local)
+	[[ -z $openwrt_info_enable ]] || entries+=( $op_host_ips )
+	for entry in "${entries[@]}"; do
+		pid=${ap_watchers[$entry]}
+		[[ -n $pid && /proc/$pid/fd/1 -ef /proc/self/fd/8 ]] || return 1
+		if [[ $entry != Local ]]; then
+			read -r host _ <<<"$(op_ssh_target "$entry")"
+			[[ -n ${ap_ready[$host]} ]] || return 1
+		fi
+	done
+}
+
+wait_ap_events() {
+	local deadline=$((SECONDS + sleeptime)) worker=$1 remaining line mac count
+	while [[ -n $worker ]] || (( SECONDS < deadline )); do
+		if [[ -n $worker ]]; then
+			kill -0 "$worker" 2>/dev/null || break
+			remaining=2
+		else
+			remaining=$((deadline - SECONDS))
+		fi
+		for mac in "${!ap_departure[@]}"; do
+			(( ap_departure[$mac] - SECONDS >= remaining )) || remaining=$((ap_departure[$mac] - SECONDS))
+		done
+		if IFS= read -r -t 0 -u 8; then
+			IFS= read -r -u 8 line || break
+		elif (( remaining <= 0 )) || ! IFS= read -r -t "$remaining" -u 8 line; then
+			line=""
+		fi
+		if [[ -n $line ]]; then
+			record_ap_event "$line"
+			for ((count=1; count<256; count++)); do
+				IFS= read -r -t 0 -u 8 || break
+				IFS= read -r -u 8 line || break
+				record_ap_event "$line"
+			done
+		fi
+		apply_ap_events
+	done
+}
+
+# One bounded worker per router. Only a complete reply can prove a client left.
+collect_hostapd() {
+	local work host port i source count iface mac freq ip name band reason detail accepted
+	local started=$SECONDS
+	work=$(mktemp -d "${dir}/ap.XXXXXX") || { ap_incomplete=1; return; }
+	[ ! -f "${dir}/send_pid" ] || ap_incomplete=1
+	: >"$work/json"
+	local -a sources=(Local) ports=("") pids=()
+	if [ -n "$openwrt_info_enable" ] && [ ! -f "${dir}/send_pid" ]; then
+		for host in $op_host_ips; do
+			read -r source port <<<"$(op_ssh_target "$host")"
+			sources+=("$source")
+			ports+=("$port")
+		done
+	fi
+	local remote_cmd="$(declare -f dump_hostapd)
+echo @@LEASES
+cat /tmp/dhcp.leases 2>/dev/null
+echo @@ARP
+cat /proc/net/arp 2>/dev/null
+echo @@AP
+dump_hostapd"
+	for i in "${!sources[@]}"; do
+		read -r -u 5
+		{
+			if [ "$i" = 0 ]; then
+				{ echo @@AP; dump_hostapd; } >"$work/$i"
+			else
+				op_ssh "${sources[i]}" "${ports[i]}" "$remote_cmd" >"$work/$i"
+			fi && touch "$work/$i.ok"
+			echo >&5
+		} 2>/dev/null &
+		pids+=("$!")
+	done
+	for i in "${pids[@]}"; do wait "$i"; done
+	: >"$work/leases"; : >"$work/arp"; : >"$work/devices"
+	local -A by_mac=() names=()
+	local remote_ips="" associated_ips=""
+	for i in "${!sources[@]}"; do
+		source=${sources[i]}
+		count=""
+		reason=""
+		if [ ! -f "$work/$i.ok" ]; then
+			if [ "$i" = 0 ]; then reason=local-ubus; else reason=ssh; fi
+		fi
+		if [ -s "$work/$i" ]; then
+			# Keep IP/name hints separate from association evidence.
+			awk -v leases="$work/leases" -v arp="$work/arp" -v ap="$work/json" '
+				/^@@/ {section=$1; if (section=="@@DONE") print $2; next}
+				section=="@@LEASES" && NF>=4 && $3~/^[0-9.]+$/ {print $3,tolower($2),($4=="*"?"-":$4) >> leases}
+				section=="@@ARP" && $1~/^[0-9.]+$/ && ($3=="0x2" || $3=="0x6") && $4!="00:00:00:00:00:00" {print $1,tolower($4) >> arp}
+				section=="@@AP" {print > ap}
+			' "$work/$i" >"$work/count"
+			read -r count <"$work/count"
+			detail=$(awk '$1=="@@ERROR" {print $2, $3; exit}' "$work/$i")
+			[ -z "$detail" ] || reason=$detail
+		fi
+		if [ -z "$reason" ] && ! [[ $count =~ ^[0-9]+$ ]]; then reason=missing-completion-marker; fi
+		if [ -z "$reason" ]; then
+			jq -sr --argjson n "$count" '
+			if length != $n or any(.[]; (.[1].clients | type) != "object") then error("incomplete hostapd reply") else
+			.[] | .[0] as $iface | .[1] | (.freq | if type=="number" then floor else 0 end) as $freq | .clients | to_entries[] |
+			select(.value.authorized == true) |
+			[$iface, (.key|ascii_downcase), $freq] | @tsv end' "$work/json" >"$work/rows" 2>"$work/jq-error" || {
+				IFS= read -r detail <"$work/jq-error"
+				reason="JSON: ${detail:0:120}"
+			}
+		fi
+		if [ -z "$reason" ]; then
+			ap_health[$source]=ok
+			[ "$count" = 0 ] && ap_health[$source]=empty
+			accepted=0
+			while IFS=$'\t' read -r iface mac freq; do
+				[[ $mac =~ ^([[:xdigit:]]{2}:){5}[[:xdigit:]]{2}$ ]] || continue
+				accepted=$((accepted + 1))
+				# Local wins when two APs briefly list the same roaming client.
+				[[ -n ${ap_source[$mac]} ]] && continue
+				ap_source[$mac]=$source
+				ap_iface[$mac]=$iface
+				if ((freq >= 5925)); then band=6G
+				elif ((freq >= 4900)); then band=5G
+				elif ((freq >= 2400)); then band=2.4G
+				else band=unknown; fi
+				ap_band[$mac]=$band
+				[[ -z $ap_listener ]] || ap_radio_band["$source/$iface"]=$band
+			done <"$work/rows"
+			[ "$log_scan" = 1 ] && scan_log "$(translate "hostapd %s: %s interfaces, %s authorized clients" "$source" "$count" "$accepted")"
+		else
+			ap_incomplete=1
+			[ "$log_scan" = 1 ] && scan_log "$(translate "hostapd %s: snapshot failed (%s), using ARP/ping" "$source" "$reason")"
+		fi
+		: >"$work/json"
+	done
+	if [ -n "$openwrt_info_enable" ] && [ ! -f "${dir}/send_pid" ]; then
+		while read -r ip mac name; do
+			by_mac[$mac]=$ip
+			[ -z "$name" ] || names[$mac]=$name
+		done < <(awk 'FILENAME=="/tmp/dhcp.leases" && NF>=4 {print $3,tolower($2),$4} FILENAME=="/proc/net/arp" && ($3=="0x2" || $3=="0x6") {print $1,tolower($4)}' /proc/net/arp /tmp/dhcp.leases 2>/dev/null)
+		[ ! -s "$work/arp" ] || sort -u "$work/arp" >"${dir}/openwrt_arp"
+		[ ! -s "$work/leases" ] || sort -u "$work/leases" >"${dir}/openwrt_leases"
+		while read -r ip mac name; do
+			by_mac[$mac]=$ip
+			[ "$name" = "-" ] || names[$mac]=$name
+		done <"$work/leases"
+		while read -r ip mac; do
+			by_mac[$mac]=$ip
+			remote_ips+=" $ip"
+		done <"$work/arp"
+		for mac in "${!ap_source[@]}"; do
+			source=${ap_source[$mac]}
+			[ "$source" = Local ] && continue
+			ip=${by_mac[$mac]:-${known_ip[$mac]:-unknown}}
+			printf '%s\t%s\t%s\t%s\t%s\n' "$ip" "${names[$mac]:-unknown}" "$mac" "$source" "${ap_band[$mac]}" >>"$work/devices"
+			if [ "$ip" != unknown ]; then associated_ips+=" $ip"; ap_mac[$ip]=$mac; fi
+		done
+		jq -Rn '[inputs | split("\t") | {ip:.[0],name:.[1],mac:.[2],parent:.[3],type:.[4]}]' <"$work/devices" >"$work/info" && mv "$work/info" "${dir}/openwrt_info"
+		openwrt_iplist="$associated_ips $remote_ips"
+		echo hostapd >"${dir}/openwrt_detect_mode"
+	fi
+	# A local station event only carries a MAC. Resolve it from the same
+	# LAN interfaces used by ordinary discovery before queuing an IP.
+	if [ -n "$ap_listener" ]; then
+		local devices=""
+		[ -z "$lan_interface" ] || devices=$(resolve_iface_devices "$lan_interface" "${dir}/lan_devices_cache")
+		while read -r ip mac iface; do
+			[[ ${ap_source[$mac]} = Local ]] || continue
+			if [ -n "$lan_interface" ]; then
+				case $'\n'"$devices"$'\n' in *$'\n'"$iface"$'\n'*) ;; *) continue ;; esac
+			fi
+			ap_mac[$ip]=$mac
+		done < <(awk '$3=="0x2" || $3=="0x6" {print $1,tolower($4),$6}' /proc/net/arp 2>/dev/null)
+	fi
+	[ "$log_scan" = 1 ] && scan_log "$(translate "hostapd snapshots: %ss, worker limit %s" "$((SECONDS-started))" "$max_thread_num")"
+	rm -rf "$work"
+}
+
 # 按 IP 快速找 MAC（不走 getmac 里那一长串 jq）：本机 ARP、其他 OpenWrt 的 ARP / 租约、已保存的设备
 hide_mac_of_ip() {
 	local ip="$1" mac
@@ -2627,18 +3043,164 @@ hide_device_purge() {
 	log_change "[INFO] $(translate "Hidden devices removed from the device list: %s" "$n")"
 }
 
+collect_tx_activity() {
+	local ip mac bytes key
+	local -A current=()
+	if [ -r "$dir/usage.db" ]; then
+		while read -r ip mac bytes; do
+			key="$ip,$mac"
+			if [[ -n ${tx_previous[$key]} ]] && (( 10#$bytes > 10#${tx_previous[$key]} )); then
+				tx_active[$ip]=$mac
+			fi
+			current[$key]=$bytes
+		done < <(awk -F, '
+			NR==1 {for(i=1;i<=NF;i++) {h=tolower($i); sub(/^#/, "", h); col[h]=i}; next}
+			col["mac"] && col["ip"] && col["out"] {
+				ip=$(col["ip"]); mac=tolower($(col["mac"])); bytes=$(col["out"])
+				if(ip ~ /^[0-9.]+$/ && length(mac)==17 && mac != "00:00:00:00:00:00" && mac ~ /^[0-9a-f:]+$/ && bytes ~ /^[0-9]+$/)
+					print ip,mac,bytes
+			}' "$dir/usage.db")
+	fi
+	tx_previous=()
+	for key in "${!current[@]}"; do tx_previous[$key]=${current[$key]}; done
+}
+
+# DHCP may complete after the station event, especially on a remote-only
+# subnet. Read address hints once per affected router on the regular scan.
+refresh_ap_addresses() {
+	local mac ip entry host port work pid i=0
+	local -A missing=()
+	local -a pids=() sources=()
+	for mac in "${!ap_source[@]}"; do
+		host=${ap_source[$mac]}
+		[[ $host != Local && -z ${ap_ip_hint[$mac]} ]] || continue
+		(( SECONDS >= ${ap_lease_retry[$host]:-0} )) && missing[$host]=1
+	done
+	(( ${#missing[@]} )) || return 0
+	work=$(mktemp -d "$dir/ap-lease.XXXXXX") || return
+	for entry in $op_host_ips; do
+		read -r host port <<<"$(op_ssh_target "$entry")"
+		[[ -n ${missing[$host]} ]] || continue
+		unset 'missing[$host]'
+		sources+=("$host")
+		ap_lease_retry[$host]=$((SECONDS + 15))
+		read -r -u 5
+		(
+			op_ssh "$host" "$port" 'cat /tmp/dhcp.leases 2>/dev/null; cat /proc/net/arp' >"$work/$i"
+			echo >&5
+		) &
+		pids+=("$!")
+		((i++))
+	done
+	for pid in "${pids[@]}"; do wait "$pid"; done
+	for ((i=0; i<${#pids[@]}; i++)); do
+		while read -r mac ip; do
+			[[ -n $mac && ${ap_source[$mac]} = "${sources[i]}" && -z ${known_ip[$mac]} ]] || continue
+			ap_ip_hint[$mac]=$ip
+			ap_mac[$ip]=$mac
+		done < <(awk 'NF==5 && $3~/^[0-9.]+$/ {print tolower($2),$3}
+			($3=="0x2" || $3=="0x6") && $1~/^[0-9.]+$/ {print tolower($4),$1}' "$work/$i")
+	done
+	rm -rf "$work"
+}
+
+# Queue each IP once; known devices own their status transition for this scan.
+queue_hostapd_device() {
+	local ip="$1"
+	[[ -z $ip || -n ${scheduled[$ip]} ]] && return
+	scheduled[$ip]=1
+	if [[ -z ${known_status[$ip]} && -n $hide_ips$hide_macs ]] && is_hidden_device "$ip" "$([ -n "$hide_macs" ] && hide_mac_of_ip "$ip")"; then return; fi
+	read -r -u 5
+	{
+		if [[ -n ${known_status[$ip]} ]]; then
+			down "$ip" "${previous_ap[$ip]}" "${known_status[$ip]}" "${ap_mac[$ip]}"
+		else
+			up "$ip" "${ap_mac[$ip]}"
+		fi
+		echo >&5
+	} &
+}
+
 first() {
 	# 注：此处为后台任务，无法操作父进程变量，故每个线程结束后都必须保存变量到文件
 	# 耗时太长，定时推送不再检查
 	# 隐藏设备：先把已记录且命中隐藏列表的设备删掉，避免它们被当成离线推送
 	hide_device_load && hide_device_purge
-	local IPLIST=$(jq -r '.devices[] | select(.status == "online" or .status == "unknown") | .ip' "$devices_json" | sort -u)
+	if [ -z "$ap_listener" ]; then
+		local -A ap_source=() ap_iface=() ap_band=() ap_health=() ap_mac=()
+		local ap_incomplete=0 openwrt_iplist=""
+	fi
+	local -A tx_active=() ap_hold=()
+	local -A known_ip=() known_status=() previous_ap=() scheduled=()
+	local ap_scan_active="" scan_start=$SECONDS phase=$SECONDS ip mac status last iface
+	local IPLIST
+	if [[ $offline_detect_method = hostapd || $offline_detect_method = hostapd_listen ]] && [ "$passive_mode" != 1 ]; then
+		ap_scan_active=1
+		while read -r ip mac status last iface; do
+			[ -n "$ip" ] || continue
+			[[ -n $mac && $mac != unknown ]] && known_ip[${mac,,}]=$ip
+			known_status[$ip]=$status
+			if [ "$last" != - ]; then previous_ap[$ip]=$last
+			elif [ -d "/sys/class/net/$iface/wireless" ]; then previous_ap[$ip]=Local; fi
+		done < <(jq -r '.devices[] | select(.status=="online" or .status=="unknown") | [.ip, (.mac // "unknown"), .status, (.hostapd_source // "-"), (.interface // "-")] | @tsv' "$devices_json")
+		[ -z "$ap_listener" ] || ensure_ap_listeners
+		if [[ -z $ap_listener ]] || (( SECONDS >= ap_refresh_at )); then
+			ap_source=(); ap_iface=(); ap_band=(); ap_health=(); ap_mac=()
+			if [[ -n $ap_listener ]]; then ap_radio_band=(); ap_ip_hint=(); fi
+			ap_incomplete=0; openwrt_iplist=""
+			collect_hostapd
+			if [ -n "$ap_listener" ]; then
+				for mac in "${!ap_departure[@]}"; do
+					[[ -z ${ap_source[$mac]} ]] || unset 'ap_departure[$mac]'
+				done
+				ap_refresh_at=$((SECONDS + 300))
+				(( ap_incomplete )) && ap_refresh_at=0
+
+			fi
+		fi
+		if [[ -n $ap_listener ]]; then
+			for ip in "${!ap_mac[@]}"; do ap_ip_hint[${ap_mac[$ip]}]=$ip; done
+			for mac in "${!known_ip[@]}"; do ap_ip_hint[$mac]=${known_ip[$mac]}; done
+			refresh_ap_addresses
+			for mac in "${!ap_departure[@]}"; do
+				ip=${known_ip[$mac]}
+				[[ -z $ip ]] || ap_hold[$ip]=1
+			done
+		fi
+	else
+		IPLIST=$(jq -r '.devices[] | select(.status == "online" or .status == "unknown") | .ip' "$devices_json" | sort -u)
+	fi
+	[[ $passive_mode = 1 ]] || collect_tx_activity
 	[ ! -f "${dir}/send_pid" ] && getgateway
 	[ ! -f "${dir}/send_pid" ] && getmiwifi
-	[ ! -f "${dir}/send_pid" ] && getopenwrt
+	[ ! -f "${dir}/send_pid" ] && [ -z "$ap_scan_active" ] && getopenwrt
 	[ ! -f "${dir}/send_pid" ] && getmikrotik
 	[ ! -f "${dir}/send_pid" ] && getwireguard
-	[ ! -f "${dir}/send_pid" ] && silent_run scanlocalip
+	if [[ -n $ap_scan_active && -z $ap_listener ]]; then
+		for ip in "${!known_status[@]}"; do
+			[[ -n ${previous_ap[$ip]} ]] && queue_hostapd_device "$ip"
+		done
+		for ip in "${!ap_mac[@]}"; do queue_hostapd_device "$ip"; done
+	fi
+	[ "$log_scan" = 1 ] && scan_log "$(translate "Device discovery: helpers %ss; starting IP range scan" "$((SECONDS-phase))")"
+	phase=$SECONDS
+	local ap_scan_work="" checked
+	if [[ -n $ap_listener && ! -f $dir/send_enable.lock ]]; then
+		ap_scan_work=$(mktemp -d "$dir/ap-scan.XXXXXX")
+	fi
+	if [[ -n $ap_scan_work && -n $scan_ip_range && ! -f $dir/send_enable.lock && ! -f $dir/send_pid ]]; then
+		if (( SECONDS >= ap_range_at )); then
+			(silent_run scanlocalip; echo SCAN-DONE >&8) &
+			local range_pid=$!
+			wait_ap_events "$range_pid"
+			wait "$range_pid"
+			ap_range_at=$((SECONDS + device_info_helper_sleeptime))
+		fi
+	elif [[ ! -f $dir/send_pid ]]; then
+		silent_run scanlocalip
+	fi
+	[ "$log_scan" = 1 ] && scan_log "$(translate "IP range scan: %ss; worker limit %s" "$((SECONDS-phase))" "$max_thread_num")"
+	phase=$SECONDS
 	for ip in $IPLIST; do
 		[ -n "$passive_mode" ] && [ "$passive_mode" -eq "1" ] && break
 		# 获取一个令牌
@@ -2649,7 +3211,7 @@ first() {
 			echo >&5
 		} &
 	done
-	wait
+	[ -n "$ap_scan_active" ] || wait
 
 	# 参与 ARP 扫描的接口，支持多网段（主网络、访客网络、经旁路/漫游路由桥接进来的其他网段等）
 	# 手动配置（lan_interface 不为空）：只扫描用户显式选中的接口，按"白名单"过滤
@@ -2680,6 +3242,26 @@ first() {
 	local IPLIST+=$'\n'"$wireguard_iplist"
 	local IPLIST+=$'\n'"$always_check_ip_list"
 	local IPLIST=$(echo "$IPLIST" | grep -v "^$" | sort -u)
+	if [ -n "$ap_scan_active" ]; then
+		if [[ -n $ap_scan_work ]]; then
+			(
+				for ip in $IPLIST "${!known_status[@]}" "${!ap_mac[@]}"; do queue_hostapd_device "$ip"; done
+				wait
+				echo "${#scheduled[@]}" >"$ap_scan_work/count"
+				echo SCAN-DONE >&8
+			) &
+			local scan_pid=$!
+			wait_ap_events "$scan_pid"
+			wait "$scan_pid"
+			read -r checked <"$ap_scan_work/count"
+			rm -rf "$ap_scan_work"
+		else
+			for ip in $IPLIST "${!known_status[@]}" "${!ap_mac[@]}"; do queue_hostapd_device "$ip"; done
+			wait
+		fi
+		[ "$log_scan" = 1 ] && scan_log "$(translate "Device checks: %ss, %s candidates, %s online or pending; total scan %ss" "$((SECONDS-phase))" "${checked:-${#scheduled[@]}}" "$(jq '[.devices[] | select(.status=="online" or .status=="unknown")] | length' "$devices_json")" "$((SECONDS-scan_start))")"
+		return 0
+	fi
 	for ip in $IPLIST; do
 		[ -n "$passive_mode" ] && [ "$passive_mode" -eq "1" ] && break
 		# 命中隐藏列表的设备不进入设备列表（只比对 IP 时不用查 MAC）
@@ -2701,17 +3283,24 @@ up() {
 	[ -z "$ip" ] && return 1
 
 	jq -e --arg ip "$ip" '.devices[] | select(.ip == $ip and .status == "online") | .ip' "$devices_json" >/dev/null && return # 如果当前 IP 为在线，退出
-	local mac=$(getmac "$ip")
+	local mac="${2:-$(getmac "$ip")}"
 	# 主动探测模式：设备列表里已有记录（离线/待验证）的 IP，复活前也要探测，
 	# 否则 Wi-Fi 关联列表里残留的旧记录会在刚判离线后又把它改回在线。全新设备保持原有的快速判断
-	local up_probe=""
+	local up_probe="" ap_decision="" ap_owner="" ap_previous=""
 	[ "$offline_detect_method" = "probe" ] && jq -e --arg ip "$ip" '.devices[] | select(.ip == $ip)' "$devices_json" >/dev/null 2>&1 && up_probe="1"
 	getping "$ip" "$mac" "$up_timeout" "1" "$up_probe"
 	local ping_online=$?
 
 	# 连通
 	if [ "$ping_online" -eq "0" ]; then
+		local http_access name interface
+		if ! jq -e --arg ip "$ip" --arg mac "$mac" 'any(.devices[]; .ip == $ip and (.mac | ascii_downcase) == ($mac | ascii_downcase) and $mac != "unknown")' "$devices_json" >/dev/null; then
+			name=$(getname "$ip" "$mac")
+			interface=$(getinterface "$ip" "$mac")
+			[ -n "$ap_event_dispatch" ] || http_access=$(check_http_access "$ip")
+		fi
 		silent_run LockFile lock
+		if [[ -n $ap_scan_work && -z $ap_event_dispatch && -e $ap_scan_work/$ip ]]; then silent_run LockFile unlock; return; fi
 		local time_up=$(date +%s)
 
 		# 如果 IP 不存在，或者 http_access 键值为空，检查 http_access 参数
@@ -2729,9 +3318,6 @@ up() {
 			# 注意：这里不清除流量异常检测的窗口累计状态。设备断线重连后，窗口内的累计继续算，窗口到期才重置（见 usage_track）
 			# 删除当前 IP 对应的键值，重新写入，否则要启用 unique_by(.ip) 去重
 			jq --arg ip "$ip" 'del(.devices[] | select(.ip == $ip))' "$devices_json" >"$tmp_devices_json" && mv "$tmp_devices_json" "$devices_json"
-			local name=$(getname "$ip" "$mac")
-			local interface=$(getinterface "$ip" "$mac")
-			local http_access=$(check_http_access "$ip")
 			new_device='{
 				"name": "'"${name}"'",
 				"ip": "'"${ip}"'",
@@ -2742,7 +3328,7 @@ up() {
 				"http_access": "'"${http_access}"'",
 				"status": "online"
 			}'
-			jq --argjson newdevice "$new_device" '.devices += [$newdevice]' "$devices_json" >"$tmp_devices_json" && mv "$tmp_devices_json" "$devices_json"
+			jq --argjson newdevice "$new_device" --arg ap "$ap_owner" --arg event "$ap_event_dispatch" '.devices += [($newdevice | if $event != "" then .http_access=null else . end | if $ap != "" then .hostapd_source = $ap | .parent = $ap else . end)]' "$devices_json" >"$tmp_devices_json" && mv "$tmp_devices_json" "$devices_json"
 
 			blackwhitelist ${mac}
 			local ip_blackwhite=$?
@@ -2750,12 +3336,12 @@ up() {
 			[ -f "${dir}/send_enable.lock" ] || [ -z "$notification_online" ] || [ -z "$ip_blackwhite" ] && silent_run LockFile unlock && return
 			[ -z "$ip_blackwhite" ] || [ "$ip_blackwhite" -ne "0" ] && silent_run LockFile unlock && return
 
-			[ -f "${dir}/title" ] && local title=$(cat "${dir}/title")
-			[ -f "${dir}/content" ] && local content=$(cat "${dir}/content")
+			[ -f "${notice_dir:-$dir}/title" ] && local title=$(cat "${notice_dir:-$dir}/title")
+			[ -f "${notice_dir:-$dir}/content" ] && local content=$(cat "${notice_dir:-$dir}/content")
 
 			# 同一轮已经有设备连接的话，沿用同一个小标题，不再重复
 			local content_title="${str_title_start}${font_success_start}$(translate "New device connected")${font_success_end}${str_title_end}"
-			grep -q '^online ' "${dir}/title_stat" 2>/dev/null && content_title=""
+			grep -q '^online ' "${notice_dir:-$dir}/title_stat" 2>/dev/null && content_title=""
 			title_event online "${name}$(iface_suffix "$interface")"
 			local title=$(title_compose)
 
@@ -2767,7 +3353,8 @@ ${str_linefeed}${str_tab} - $(translate "Client IP:")${str_space}${str_space}${s
 ${str_linefeed}${str_tab} - $(translate "Client MAC:")${str_space}${str_space}${str_space}${str_space}${mac}\
 ${str_linefeed}${str_tab} - $(translate "Network Interface:")${str_space}${str_space}${str_space}${str_space}${str_space}$(iface_display "$interface")"
 
-			local up_dbm=$(get_signal_dbm "$mac")
+			local up_dbm=""
+			[ -n "$ap_event_dispatch" ] || up_dbm=$(get_signal_dbm "$mac")
 			[ -n "$up_dbm" ] && content="${content}\
 ${str_linefeed}${str_tab} - $(translate "Signal Strength:")${str_space}${str_space}${up_dbm} dBm"
 
@@ -2775,8 +3362,8 @@ ${str_linefeed}${str_tab} - $(translate "Signal Strength:")${str_space}${str_spa
 			[ -n "$up_dbm" ] && up_log="${up_log} dbm:${up_dbm}"
 			log_change "${disturb_text} ${up_log}"
 
-			[ -n "$title" ] && echo "$title" >"${dir}/title"
-			[ -n "$content" ] && echo -n "$content" >>"${dir}/content"
+			[ -n "$title" ] && echo "$title" >"${notice_dir:-$dir}/title"
+			[ -n "$content" ] && echo -n "$content" >"${notice_dir:-$dir}/content"
 		fi
 		silent_run LockFile unlock
 	fi
@@ -2786,15 +3373,18 @@ ${str_linefeed}${str_tab} - $(translate "Signal Strength:")${str_space}${str_spa
 down() {
 	local ip="$1"
 	[ -z "$ip" ] && return 1
-	local mac=$(getmac "$ip")
+	local mac="${4:-$(getmac "$ip")}"
 
-	tmp_timeout=$down_timeout && tmp_retry_count=$timeout_retry_count
-	[ -n "$only_timeout_push" ] && blackwhitelist "$mac"
-	local ip_blackwhite=$? && [ "$ip_blackwhite" -ne "0" ] && tmp_timeout=10 && tmp_retry_count=2
-	local probe_flag="" probe_confirmed=""
+	local tmp_timeout=$down_timeout tmp_retry_count=$timeout_retry_count
+	if [ "$only_timeout_push" = 1 ] && ! blackwhitelist "$mac"; then
+		tmp_timeout=10
+		tmp_retry_count=2
+	fi
+	local probe_flag="" probe_confirmed="" ap_decision="" ap_owner="" ap_previous="$2"
 	[ "$offline_detect_method" = "probe" ] && probe_flag="1"
 	getping "$ip" "$mac" "$tmp_timeout" "$tmp_retry_count" "$probe_flag"
 	local ping_online=$?
+	[ "$ap_decision" = "offline" ] && probe_confirmed=1
 	# 主动探测模式：第一次探测失败后，隔几秒在同一轮里再探测一次；两次都失败就直接判离线，
 	# 不再等下一个扫描周期做二次确认（原方式是 online -> unknown -> 下一轮 offline）
 	if [ "$probe_flag" = "1" ] && [ "$ping_online" -eq "1" ]; then
@@ -2805,7 +3395,21 @@ down() {
 		ping_online=$?
 		[ "$ping_online" -eq "1" ] && probe_confirmed="1" && scan_log "$(translate "Active probe: %s (%s) failed twice, marked offline" "$ip" "$mac")"
 	fi
+	local name interface http_pending="" http_access=""
+	if [ "$ping_online" -eq 0 ]; then
+		name=$(getname "$ip" "$mac")
+		interface=$(getinterface "$ip" "$mac")
+		if [[ -n $ap_listener ]] && jq -e --arg ip "$ip" 'any(.devices[]; .ip==$ip and has("http_access") and .http_access==null)' "$devices_json" >/dev/null; then
+			http_pending=1
+			http_access=$(check_http_access "$ip")
+		fi
+	fi
 	silent_run LockFile lock
+	if [[ -n $ap_scan_work && -z $ap_event_dispatch && -e $ap_scan_work/$ip ]]; then silent_run LockFile unlock; return; fi
+
+	if [[ -n $http_pending ]]; then
+		jq --arg ip "$ip" --arg http "$http_access" '(.devices[] | select(.ip==$ip) | .http_access)=$http' "$devices_json" >"$tmp_devices_json" && mv "$tmp_devices_json" "$devices_json"
+	fi
 
 	# 离线，置入待验证区
 	if [ "$ping_online" -eq "1" ]; then
@@ -2819,8 +3423,9 @@ down() {
 		fi
 	# 更新设备信息
 	else
-		local name=$(getname "$ip" "$mac")
-		local interface=$(getinterface "$ip" "$mac")
+		if [ -n "$ap_scan_active" ] && { [ "$3" = unknown ] || { [ -n "$ap_owner" ] && [ "$ap_owner" != "$ap_previous" ]; }; }; then
+			jq --arg ip "$ip" --arg ap "$ap_owner" '.devices |= map(if .ip == $ip then .status = "online" | if $ap != "" then .hostapd_source = $ap | .parent = $ap else . end else . end)' "$devices_json" >"$tmp_devices_json" && mv "$tmp_devices_json" "$devices_json"
+		fi
 
 		if ! jq -e --arg ip "$ip" --arg mac "$mac" --arg name "$name" --arg interface "$interface" '.devices[] | select(.ip == $ip and (.mac | ascii_downcase) == ($mac | ascii_downcase) and .name == $name and .interface == $interface) | .ip' "$devices_json" >/dev/null; then
 			jq --arg ip "$ip" --arg new_mac "$mac" --arg new_name "$name" --arg new_interface "$interface" '
@@ -2836,10 +3441,14 @@ down() {
 		fi
 
 		# 读取 type 和 parent
-		[ -f "${dir}/openwrt_info" ] && {
-			local tmp_type=$(jq -r --arg mac "$mac" '.[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase)) | .type' "${dir}/openwrt_info")
-			local tmp_parent=$(jq -r --arg mac "$mac" '.[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase)) | .parent' "${dir}/openwrt_info")
-		}
+		local tmp_type="" tmp_parent=""
+		if [ -n "$ap_owner" ]; then
+			tmp_type=${ap_band[${mac,,}]}
+			tmp_parent=$ap_owner
+		elif [ -f "${dir}/openwrt_info" ]; then
+			tmp_type=$(jq -r --arg mac "$mac" '.[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase)) | .type' "${dir}/openwrt_info")
+			tmp_parent=$(jq -r --arg mac "$mac" '.[] | select((.mac | ascii_downcase) == ($mac | ascii_downcase)) | .parent' "${dir}/openwrt_info")
+		fi
 
 		[ -f "${dir}/miwifi_info" ] && [ -z "$tmp_type" ] && {
 			local tmp_type=$(jq -r --arg ip "$ip" '.[] | select(.ip == $ip) | .type' "${dir}/miwifi_info")
@@ -2851,7 +3460,7 @@ down() {
 			local tmp_parent=$(jq -r --arg ip "$ip" '.[] | select(.ip == $ip) | .parent' "${dir}/gateway_info")
 		}
 
-		[ -n "$tmp_type" ] && jq --arg ip "$ip" --arg type "$tmp_type" --arg parent "$tmp_parent" '
+		[ -n "$tmp_type" ] && ! jq -e --arg ip "$ip" --arg type "$tmp_type" --arg parent "$tmp_parent" 'any(.devices[]; .ip==$ip and .type==$type and .parent==$parent)' "$devices_json" >/dev/null && jq --arg ip "$ip" --arg type "$tmp_type" --arg parent "$tmp_parent" '
 			.devices |= map(
 				if .ip == $ip then
 					.type = $type |
@@ -4566,9 +5175,9 @@ ${str_space}${log_type_short} ${login_mode}"
 # 设备离线通知
 down_send() {
 	# 如果没有离线设备，退出
-	[ "$(jq '.devices | map(select(.status == "offline")) | length' "$devices_json")" -eq 0 ] && return
+	[ "$(jq --arg event "$ap_event_dispatch" '.devices | map(select(.status == "offline" and ($event == "" or .hostapd_event == true))) | length' "$devices_json")" -eq 0 ] && return
 
-	local IPLIST=$(jq -r '.devices[] | select(.status == "offline") | .ip' "$devices_json" | sort -u)
+	local IPLIST=$(jq -r --arg event "$ap_event_dispatch" '.devices[] | select(.status == "offline" and ($event == "" or .hostapd_event == true)) | .ip' "$devices_json" | sort -u)
 	for ip in $IPLIST; do
 		local mac=$(getmac "$ip")
 		blackwhitelist "$mac"
@@ -4585,7 +5194,7 @@ down_send() {
 
 		# 同一轮已经有设备断开的话，沿用同一个小标题，不再重复
 		content_title="${str_splitline}${str_title_start}${font_fail_start}$(translate "Device Disconnected")${font_fail_end}${str_title_end}"
-		grep -q '^offline ' "${dir}/title_stat" 2>/dev/null && content_title=""
+		grep -q '^offline ' "${notice_dir:-$dir}/title_stat" 2>/dev/null && content_title=""
 		local interface=$(jq -r --arg ip "$ip" '[.devices[] | select(.ip == $ip and .status == "offline") | .interface][0] // empty' "$devices_json")
 		title_event offline "${name}$(iface_suffix "$interface")"
 		title=$(title_compose)
@@ -4597,7 +5206,8 @@ ${str_linefeed}${str_tab} - $(translate "Client IP:")${str_space}${str_space}${s
 ${str_linefeed}${str_tab} - $(translate "Client MAC:")${str_space}${str_space}${str_space}${str_space}${mac}$(iface_body_line "$interface")${ip_total}\
 ${str_linefeed}${str_tab} - $(translate "Uptime:")${str_space}${str_space}${str_space}${str_space}${time1}"
 
-		local down_dbm=$(get_signal_dbm "$mac")
+		local down_dbm=""
+		[ -n "$ap_event_dispatch" ] || down_dbm=$(get_signal_dbm "$mac")
 		[ -n "$down_dbm" ] && content="${content}\
 ${str_linefeed}${str_tab} - $(translate "Signal Strength:")${str_space}${str_space}${down_dbm} dBm"
 
@@ -4607,7 +5217,7 @@ ${str_linefeed}${str_tab} - $(translate "Signal Strength:")${str_space}${str_spa
 		
 	done
 	silent_run LockFile lock
-	jq 'del(.devices[] | select(.status == "offline"))' "$devices_json" >"$tmp_devices_json" && mv "$tmp_devices_json" "$devices_json"
+	jq --arg event "$ap_event_dispatch" 'del(.devices[] | select(.status == "offline" and ($event == "" or .hostapd_event == true)))' "$devices_json" >"$tmp_devices_json" && mv "$tmp_devices_json" "$devices_json"
 	silent_run LockFile unlock
 }
 
