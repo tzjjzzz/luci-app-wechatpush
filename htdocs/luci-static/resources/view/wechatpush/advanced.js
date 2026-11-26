@@ -97,12 +97,13 @@ return view.extend({
 		o.value('original', _('Original method'));
 		o.value('probe', _('Active probe'));
 		o.value('hostapd', _('hostapd client list'));
-		o.description = _('Disable active detection: device online/offline events are no longer pushed. Suitable for users who are not sensitive to online devices but need other features.<br/>Original method: a device that is still in the Wi-Fi association list is treated as online. A phone that silently walks out of range stays listed until hostapd removes it (default 5 minutes).<br/>Active probe: a Wi-Fi device that has been silent for a while is probed with ARP (a few packets, with a cooldown per device). If the probe fails, it is repeated once after a short delay, and two failures mark the device offline right away, without waiting for the next scan cycle. The values can be adjusted below. In this mode the offline detection count is treated as at least 1.<br/>hostapd client list: poll local and selected OpenWrt APs every device scan. A tracked Wi-Fi client missing from complete AP lists is marked offline in that scan. Wired devices and incomplete replies use ARP/ping. Enable scan logging to see the AP, decision and timings.');
+		o.value('hostapd_listen', _('hostapd event listener'));
+		o.description = _('Disable active detection: device online/offline events are no longer pushed. Suitable for users who are not sensitive to online devices but need other features.<br/>Original method: a device that is still in the Wi-Fi association list is treated as online. A phone that silently walks out of range stays listed until hostapd removes it (default 5 minutes).<br/>Active probe: a Wi-Fi device that has been silent for a while is probed with ARP (a few packets, with a cooldown per device). If the probe fails, it is repeated once after a short delay, and two failures mark the device offline right away, without waiting for the next scan cycle. The values can be adjusted below. In this mode the offline detection count is treated as at least 1.<br/>hostapd client list: poll local and selected OpenWrt APs every device scan. A tracked Wi-Fi client missing from complete AP lists is marked offline in that scan. Wired devices and incomplete replies use ARP/ping. Enable scan logging to see the AP, decision and timings.') + '<br/>' + _('Listen for hostapd connection events locally and on each selected OpenWrt AP over SSH. After a disconnect, wait three seconds and check all APs again for roaming. Active detection skips wired ARP/ping when upload counters increase.');
 		o.cfgvalue = function (section_id) {
 			if (uci.get('wechatpush', section_id, 'passive_mode') == '1')
 				return 'passive';
 			var mode = uci.get('wechatpush', section_id, 'offline_detect_method');
-			return mode == 'probe' || mode == 'hostapd' ? mode : 'original';
+			return ['probe', 'hostapd', 'hostapd_listen'].includes(mode) ? mode : 'original';
 		};
 		o.write = function (section_id, value) {
 			uci.set('wechatpush', section_id, 'passive_mode', value == 'passive' ? '1' : '0');
@@ -168,6 +169,7 @@ return view.extend({
 		o.depends('detect_mode', 'original');
 		o.depends('detect_mode', 'probe');
 		o.depends('detect_mode', 'hostapd');
+		o.depends('detect_mode', 'hostapd_listen');
 
 		o = s.option(form.Value, "down_timeout", _('Device offline detection timeout (s)'))
 		o.default = '10';
@@ -177,6 +179,7 @@ return view.extend({
 		o.depends('detect_mode', 'original');
 		o.depends('detect_mode', 'probe');
 		o.depends('detect_mode', 'hostapd');
+		o.depends('detect_mode', 'hostapd_listen');
 
 		o = s.option(form.Value, "timeout_retry_count", _('Offline detection count'))
 		o.default = '2';
@@ -187,6 +190,7 @@ return view.extend({
 		o.depends('detect_mode', 'original');
 		o.depends('detect_mode', 'probe');
 		o.depends('detect_mode', 'hostapd');
+		o.depends('detect_mode', 'hostapd_listen');
 
 		o = s.option(form.Value, 'probe_inactive_secs', _('Probe: silent time before probing (s)'));
 		o.rmempty = true;
@@ -223,6 +227,7 @@ return view.extend({
 		o.depends('detect_mode', 'original');
 		o.depends('detect_mode', 'probe');
 		o.depends('detect_mode', 'hostapd');
+		o.depends('detect_mode', 'hostapd_listen');
 
 		o = s.option(form.DynamicList, 'always_check_ip_list', _('IP address to always scan'));
 		o.datatype = 'ipaddr';
@@ -233,6 +238,7 @@ return view.extend({
 		o.depends('detect_mode', 'original');
 		o.depends('detect_mode', 'probe');
 		o.depends('detect_mode', 'hostapd');
+		o.depends('detect_mode', 'hostapd_listen');
 
 		o = s.option(form.MultiValue, 'lan_interface', _('LAN interfaces to scan'));
 		lanNets.forEach(function (net) {
@@ -245,6 +251,7 @@ return view.extend({
 		o.depends('detect_mode', 'original');
 		o.depends('detect_mode', 'probe');
 		o.depends('detect_mode', 'hostapd');
+		o.depends('detect_mode', 'hostapd_listen');
 
 		o = s.option(form.MultiValue, 'device_info_helper', _('Assist in obtaining device information'));
 		o.value('gateway_info', _('Retrieve hostname list from modem'));
@@ -258,6 +265,7 @@ return view.extend({
 		o.depends('detect_mode', 'original');
 		o.depends('detect_mode', 'probe');
 		o.depends('detect_mode', 'hostapd');
+		o.depends('detect_mode', 'hostapd_listen');
 
 		o = s.option(form.Value, "gateway_host_url", _('Optical modem login URL'));
 		o.rmempty = true;
