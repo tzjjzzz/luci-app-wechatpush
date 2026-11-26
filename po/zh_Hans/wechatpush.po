@@ -932,8 +932,8 @@ msgid "hostapd client list"
 msgstr "hostapd 客户端列表"
 
 #: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/advanced.js
-msgid "Disable active detection: device online/offline events are no longer pushed. Suitable for users who are not sensitive to online devices but need other features.<br/>Original method: a device that is still in the Wi-Fi association list is treated as online. A phone that silently walks out of range stays listed until hostapd removes it (default 5 minutes).<br/>Active probe: a Wi-Fi device that has been silent for a while is probed with ARP (a few packets, with a cooldown per device). If the probe fails, it is repeated once after a short delay, and two failures mark the device offline right away, without waiting for the next scan cycle. The values can be adjusted below. In this mode the offline detection count is treated as at least 1.<br/>hostapd client list: check all hostapd interfaces through ubus. Wi-Fi devices are considered offline as soon as they disappear from the authorized client list."
-msgstr "关闭主动探测：设备上下线将不再提示。适用于对在线设备不敏感，但需要其他功能的用户。<br/>原有方式：设备只要还在 Wi-Fi 关联列表里就算在线。手机悄悄走出信号范围时，会一直留在列表里，直到 hostapd 把它移除（默认约 5 分钟）。<br/>主动探测：Wi-Fi 设备安静一段时间后，用 ARP 探测一下（只发少量包，每台设备有冷却时间）。探测失败后隔几秒再探测一次，连续两次失败就直接判离线，不再等下一个扫描周期。具体数值可在下面调整。该模式下“离线检测次数”至少按 1 次计算。<br/>hostapd 客户端列表：通过 ubus 检查所有 hostapd 接口。Wi-Fi 设备从已授权客户端列表消失后立即判离线。"
+msgid "Disable active detection: device online/offline events are no longer pushed. Suitable for users who are not sensitive to online devices but need other features.<br/>Original method: a device that is still in the Wi-Fi association list is treated as online. A phone that silently walks out of range stays listed until hostapd removes it (default 5 minutes).<br/>Active probe: a Wi-Fi device that has been silent for a while is probed with ARP (a few packets, with a cooldown per device). If the probe fails, it is repeated once after a short delay, and two failures mark the device offline right away, without waiting for the next scan cycle. The values can be adjusted below. In this mode the offline detection count is treated as at least 1.<br/>hostapd client list: poll local and selected OpenWrt APs every device scan. A tracked Wi-Fi client missing from complete AP lists is marked offline in that scan. Wired devices and incomplete replies use ARP/ping. Enable scan logging to see the AP, decision and timings."
+msgstr "关闭主动探测：设备上下线将不再提示。适用于对在线设备不敏感，但需要其他功能的用户。<br/>原有方式：设备只要还在 Wi-Fi 关联列表里就算在线。手机悄悄走出信号范围时，会一直留在列表里，直到 hostapd 把它移除（默认约 5 分钟）。<br/>主动探测：Wi-Fi 设备安静一段时间后，用 ARP 探测一下（只发少量包，每台设备有冷却时间）。探测失败后隔几秒再探测一次，连续两次失败就直接判离线，不再等下一个扫描周期。具体数值可在下面调整。该模式下“离线检测次数”至少按 1 次计算。<br/>hostapd 客户端列表：每轮检查本机和所选 OpenWrt 副路由的全部 AP。已跟踪的无线设备从完整授权列表消失，本轮即判离线。有线设备或 AP 查询不完整时使用 ARP/ping。开启“记录每次扫描”可查看 AP、判断依据和耗时。"
 
 #: applications/luci-app-wechatpush/htdocs/luci-static/resources/view/wechatpush/advanced.js
 msgid "Probe: silent time before probing (s)"
@@ -2346,3 +2346,33 @@ msgstr "主题设置"
 
 msgid "Traffic alert for %s suppressed once: the increment %s is about equal to its total traffic %s right after connecting (likely a statistics backend glitch)"
 msgstr "%s 的流量报警已抑制一次：刚连接时增量 %s 与它的总流量 %s 基本相同（疑似统计后端读数异常）"
+
+msgid "hostapd %s %s: authorized on %s (%s)"
+msgstr "hostapd %s %s：已授权，所属 AP %s（%s）"
+
+msgid "hostapd %s %s: left %s, absent from all APs, offline"
+msgstr "hostapd %s %s：已离开 %s，所有 AP 均无此设备，本轮判离线"
+
+msgid "hostapd %s %s: ARP/ping fallback (previous AP: %s, incomplete snapshots: %s)"
+msgstr "hostapd %s %s：转 ARP/ping，上次 AP %s，快照不完整 %s"
+
+msgid "hostapd %s: %s interfaces, %s authorized clients"
+msgstr "hostapd %s：%s 个接口，%s 个已授权客户端"
+
+msgid "hostapd %s: incomplete SSH/ubus reply, using reachability checks for missing clients"
+msgstr "hostapd %s：SSH/ubus 查询不完整，缺失设备转 ARP/ping"
+
+msgid "hostapd snapshots: %ss, worker limit %s"
+msgstr "hostapd 快照耗时 %s 秒，最大并发 %s"
+
+msgid "Device discovery: helpers %ss; starting IP range scan"
+msgstr "辅助设备信息耗时 %s 秒，开始 IP 范围扫描"
+
+msgid "IP range scan: %ss; worker limit %s"
+msgstr "IP 范围扫描耗时 %s 秒，最大并发 %s"
+
+msgid "Device checks: %ss, %s unique IPs; total scan %ss"
+msgstr "设备检测耗时 %s 秒，共 %s 个 IP，本轮设备扫描总耗时 %s 秒"
+
+msgid "Reachability %s: rc=%s (0=online), timeout %ss, retries %s"
+msgstr "ARP/ping %s：结果 %s（0 表示在线），配置超时 %s 秒，检测次数 %s"
